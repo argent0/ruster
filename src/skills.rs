@@ -94,16 +94,19 @@ Keep it short and punchy.
                 if let Some(parent) = path.parent() {
                     if let Some(dir_name) = parent.file_name() {
                         if dir_name.to_string_lossy() != metadata.name {
-                             tracing::warn!("Skill folder name {:?} does not match metadata name '{}'", dir_name, metadata.name);
+                             tracing::warn!("Skill folder name {:?} does not match metadata name '{}'", dir_name, &(metadata.name));
                         }
                     }
                 }
+
+                tracing::debug!("Loading skill '{}'", &(metadata.name));
 
                 self.skills.push(Skill {
                     path: path.parent().unwrap().to_path_buf(),
                     metadata,
                     instructions: body.trim().to_string(),
                 });
+
                 return Ok(());
             }
         }

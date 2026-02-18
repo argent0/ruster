@@ -106,6 +106,8 @@ impl Session {
                 system_prompt.push_str(&format!("## {}\n{}\n", skill.metadata.name, skill.instructions));
             }
         }
+
+        tracing::debug!("System prompt: '{}'", &system_prompt);
         
         messages.push(json!({"role": "system", "content": system_prompt}));
         

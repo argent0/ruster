@@ -19,6 +19,52 @@ impl LlmClient {
         }
     }
 
+    pub async fn embeddings(&self, model_str: &str, input: &str) -> Result<Vec<f32>> {
+        let (provider, model_name) = model_str.split_once('/')
+            .ok_or_else(|| anyhow!("Invalid model format. Expected 'provider/model'"))?;
+
+        let url = match provider {
+            "ollama" => format!("{}/ollama/api/embeddings", self.base_url),
+            _ => return Err(anyhow!("Embeddings not implemented for provider: {}", provider)),
+        };
+
+        let payload = match provider {
+            "ollama" => {
+                json!({
+                    "model": model_name,
+                    "prompt": input
+                })
+            },
+            _ => unreachable!(),
+        };
+
+        let res = self.client.post(&url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let error_text = res.text().await.unwrap_or_default();
+            return Err(anyhow!("Embeddings request failed: {} - {}", url, error_text));
+        }
+
+        let body: serde_json::Value = res.json().await?;
+        
+        match provider {
+            "ollama" => {
+                if let Some(embedding) = body["embedding"].as_array() {
+                    let vec: Vec<f32> = embedding.iter()
+                        .filter_map(|v| v.as_f64().map(|f| f as f32))
+                        .collect();
+                    Ok(vec)
+                } else {
+                    Err(anyhow!("Invalid response from Ollama embeddings: {}", body))
+                }
+            },
+            _ => unreachable!(),
+        }
+    }
+
     pub async fn chat_stream(
         &self,
         model_str: &str,

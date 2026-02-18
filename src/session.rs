@@ -92,9 +92,14 @@ impl Session {
         // Detect skills based on last user message
         let last_msg = self.history.last().ok_or_else(|| anyhow!("No history found"))?;
         
+        let (rag_model, message_content) = {
+            let cfg = self.config.read().await;
+            (cfg.rag_model.clone(), last_msg.content.clone())
+        };
+        
         let skills = {
-            let mgr = self.skills_manager.read().await;
-            mgr.select_skills(&last_msg.content, &self.llm_client).await?
+            let mut mgr = self.skills_manager.write().await;
+            mgr.select_skills(&message_content, &self.llm_client, &rag_model).await?
         };
 
         let mut messages = Vec::new();

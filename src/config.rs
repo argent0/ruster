@@ -10,6 +10,7 @@ use serde_json::Value;
 pub struct Config {
     pub socket_path: String,
     pub default_model: String,
+    pub rag_model: String,
     pub skills_dirs: Vec<String>,
     pub proactive_interval_secs: u64,
     pub log_level: String,
@@ -71,6 +72,7 @@ impl Default for Config {
         Self {
             socket_path: "/tmp/ruster.sock".to_string(),
             default_model: "ollama/llama3.2".to_string(),
+            rag_model: "ollama/nomic-embed-text".to_string(),
             skills_dirs: vec![
                 "~/.config/ruster/skills".to_string(),
                 "/usr/share/ruster/skills".to_string(),

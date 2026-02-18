@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use glob::glob;
@@ -21,11 +22,15 @@ pub struct Skill {
 #[derive(Clone)]
 pub struct SkillsManager {
     skills: Vec<Skill>,
+    embedding_cache: HashMap<(String, String), Vec<f32>>,
 }
 
 impl SkillsManager {
     pub fn new() -> Self {
-        Self { skills: Vec::new() }
+        Self { 
+            skills: Vec::new(),
+            embedding_cache: HashMap::new(),
+        }
     }
 
     pub fn ensure_default_skills(&self) -> Result<()> {
@@ -34,11 +39,12 @@ impl SkillsManager {
         
         if !skills_dir.exists() {
             fs::create_dir_all(&skills_dir)?;
-            
-            // Create example skill: joke-teller
-            let joke_dir = skills_dir.join("joke-teller");
+        }
+
+        // Add Joke-teller skill
+        let joke_dir = skills_dir.join("joke-teller");
+        if !joke_dir.exists() {
             fs::create_dir_all(&joke_dir)?;
-            
             let skill_md = r#"---
 name: joke-teller
 description: Tells funny programming jokes. Use when user asks for a laugh.
@@ -57,6 +63,46 @@ Keep it short and punchy.
             fs::write(joke_dir.join("SKILL.md"), skill_md)?;
             tracing::info!("Created default skill at {:?}", joke_dir);
         }
+
+        // Add Clock skill
+        let clock_dir = skills_dir.join("clock");
+        if !clock_dir.exists() {
+            fs::create_dir_all(&clock_dir)?;
+            let clock_md = format!(r#"---
+name: clock
+description: Fetches current date and time.
+---
+
+# Clock Instructions
+
+The current system time is: {}.
+Use this information whenever the user asks for the time or date.
+"#, chrono::Local::now().to_rfc2822());
+            fs::write(clock_dir.join("SKILL.md"), clock_md)?;
+            tracing::info!("Created default skill at {:?}", clock_dir);
+        }
+
+        // Add Weather skill
+        let weather_dir = skills_dir.join("weather");
+        if !weather_dir.exists() {
+            fs::create_dir_all(&weather_dir)?;
+            let weather_md = r#"---
+name: weather
+description: Fetches weather data for a location.
+---
+
+# Weather Instructions
+
+You have access to weather data (mocked).
+When the user asks for weather:
+1. Identify the location.
+2. Provide a realistic weather forecast for that location.
+Example: "The weather in London is 15°C and cloudy."
+"#;
+            fs::write(weather_dir.join("SKILL.md"), weather_md)?;
+            tracing::info!("Created default skill at {:?}", weather_dir);
+        }
+
         Ok(())
     }
 
@@ -114,29 +160,100 @@ Keep it short and punchy.
         Err(anyhow::anyhow!("Invalid SKILL.md format: missing YAML frontmatter"))
     }
 
-    pub async fn select_skills(&self, _message: &str, _llm: &LlmClient) -> Result<Vec<Skill>> {
+    pub async fn select_skills(&mut self, message: &str, llm: &LlmClient, rag_model: &str) -> Result<Vec<Skill>> {
         if self.skills.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut prompt = String::from("Available skills:\n");
-        for skill in &self.skills {
-            prompt.push_str(&format!("- {}: {}\n", skill.metadata.name, skill.metadata.description));
-        }
-        
-        prompt.push_str(r#"
-User message: ""#);
-        prompt.push_str(_message);
-        prompt.push_str(r#""
+        // 1. Get embedding for the message
+        let query_embedding = match llm.embeddings(rag_model, message).await {
+            Ok(emb) => emb,
+            Err(e) => {
+                tracing::warn!("Failed to get query embedding: {}. Falling back to keyword search.", e);
+                let mut relevant = Vec::new();
+                for skill in &self.skills {
+                    if message.to_lowercase().contains(&skill.metadata.name.to_lowercase()) {
+                        relevant.push(skill.clone());
+                    }
+                }
+                return Ok(relevant);
+            }
+        };
 
-Return a JSON list of skill names that are relevant to this message. If none, return []. Example: ["email_fetch"]"#);
-
-        let mut relevant = Vec::new();
+        // 2. Ensure all skills have embeddings cached for this model
         for skill in &self.skills {
-            if _message.to_lowercase().contains(&skill.metadata.name) {
-                relevant.push(skill.clone());
+            let key = (rag_model.to_string(), skill.metadata.name.clone());
+            if !self.embedding_cache.contains_key(&key) {
+                let text = format!("{}: {}", skill.metadata.name, skill.metadata.description);
+                match llm.embeddings(rag_model, &text).await {
+                    Ok(emb) => {
+                        self.embedding_cache.insert(key, emb);
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to get embedding for skill '{}': {}", skill.metadata.name, e);
+                    }
+                }
             }
         }
+
+        // 3. Compute cosine similarity
+        let mut scores: Vec<(&Skill, f32)> = Vec::new();
+        for skill in &self.skills {
+            let key = (rag_model.to_string(), skill.metadata.name.clone());
+            if let Some(emb) = self.embedding_cache.get(&key) {
+                let score = cosine_similarity(&query_embedding, emb);
+                scores.push((skill, score));
+            }
+        }
+
+        // 4. Sort and select top skills
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        let mut relevant = Vec::new();
+        for (skill, score) in scores {
+            tracing::debug!("Skill '{}' score: {}", skill.metadata.name, score);
+            // Threshold for relevance
+            if score > 0.4 {
+                 relevant.push(skill.clone());
+            }
+        }
+
+        // Limit to top 3 to keep context manageable
+        relevant.truncate(3);
+
         Ok(relevant)
+    }
+}
+
+fn cosine_similarity(v1: &[f32], v2: &[f32]) -> f32 {
+    if v1.len() != v2.len() || v1.is_empty() {
+        return 0.0;
+    }
+    let dot_product: f32 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
+    let norm1: f32 = v1.iter().map(|a| a * a).sum::<f32>().sqrt();
+    let norm2: f32 = v2.iter().map(|a| a * a).sum::<f32>().sqrt();
+    
+    if norm1 == 0.0 || norm2 == 0.0 {
+        return 0.0;
+    }
+    
+    dot_product / (norm1 * norm2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cosine_similarity() {
+        let v1 = vec![1.0, 0.0];
+        let v2 = vec![1.0, 0.0];
+        assert!((cosine_similarity(&v1, &v2) - 1.0).abs() < 1e-6);
+
+        let v3 = vec![0.0, 1.0];
+        assert!((cosine_similarity(&v1, &v3) - 0.0).abs() < 1e-6);
+
+        let v4 = vec![-1.0, 0.0];
+        assert!((cosine_similarity(&v1, &v4) - (-1.0)).abs() < 1e-6);
     }
 }

@@ -13,7 +13,8 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd "$srcdir/ruster"
-  git describe --tags | sed 's/^v//;s/-/./g'
+  local _ver=$(grep '^version =' Cargo.toml | head -n 1 | cut -d '"' -f 2)
+  echo "${_ver}.r$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
 }
 
 build() {

@@ -11,6 +11,8 @@ makedepends=('git' 'rust' 'cargo')
 source=("git+https://github.com/argent0/ruster.git")
 sha256sums=('SKIP')
 
+options=(!lto)
+
 pkgver() {
   cd "$srcdir/ruster"
   local _ver=$(grep '^version =' Cargo.toml | head -n 1 | cut -d '"' -f 2)

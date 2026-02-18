@@ -1,0 +1,13 @@
+[Unit]
+Description=Ruster Persistent LLM Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ruster
+Restart=on-failure
+RestartSec=5s
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=default.target

@@ -2,12 +2,27 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use std::sync::Arc;
-use serde_json::{json, Value};
+use serde_json::{json, Value, Map};
+use serde::Deserialize;
 use futures_util::StreamExt;
 use crate::session::SessionManager;
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::Path;
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum CommandRequest {
+    Dsl {
+        command: String,
+        arguments: Value,
+    },
+    Legacy {
+        action: String,
+        #[serde(flatten)]
+        args: Map<String, Value>,
+    },
+}
 
 pub async fn start_server(socket_path: &str, session_manager: Arc<SessionManager>) -> Result<()> {
     if Path::new(socket_path).exists() {
@@ -83,10 +98,10 @@ async fn handle_connection(stream: UnixStream, session_manager: Arc<SessionManag
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() { continue; }
         
-        let req: Value = match serde_json::from_str(&line) {
+        let req: CommandRequest = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                let _ = tx.send(json!({"error": format!("Invalid JSON: {}", e)})).await;
+                let _ = tx.send(json!({"error": format!("Invalid JSON or Command format: {}", e)})).await;
                 continue;
             }
         };
@@ -105,9 +120,86 @@ async fn handle_connection(stream: UnixStream, session_manager: Arc<SessionManag
     Ok(())
 }
 
-async fn process_command(req: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
-    let action = req["action"].as_str().ok_or_else(|| anyhow!("Missing action"))?;
-    
+async fn process_command(req: CommandRequest, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
+    match req {
+        CommandRequest::Dsl { command, arguments } => {
+            match command.as_str() {
+                "session" => {
+                    let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in session arguments"))?;
+                    handle_session_action(action, arguments.clone(), sm, tx).await
+                },
+                "config" => {
+                    let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in config arguments"))?;
+                    handle_config_action(action, arguments.clone(), sm, tx).await
+                },
+                _ => {
+                    tx.send(json!({"error": format!("Unknown command: {}", command)})).await.map_err(|_| anyhow!("Send failed"))?;
+                    Ok(())
+                }
+            }
+        },
+        CommandRequest::Legacy { action, args } => {
+            // Convert Map<String, Value> to Value (Object)
+            let arguments = Value::Object(args);
+            handle_session_action(&action, arguments, sm, tx).await
+        }
+    }
+}
+
+async fn handle_config_action(action: &str, args: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
+    match action {
+        "set" => {
+            let key = args["key"].as_str().ok_or_else(|| anyhow!("Missing key"))?;
+            let val = args["value"].clone();
+            if val.is_null() { return Err(anyhow!("Missing value")); }
+            
+            {
+                let mut config = sm.config.write().await;
+                config.set_value(key, val.clone())?;
+            }
+            
+            tx.send(json!({
+                "event": "config_updated",
+                "key": key,
+                "value": val
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "get" => {
+            let key = args["key"].as_str().ok_or_else(|| anyhow!("Missing key"))?;
+            let val = {
+                let config = sm.config.read().await;
+                config.get_value(key)?
+            };
+            tx.send(json!({
+                "event": "config_value",
+                "key": key,
+                "value": val
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "list" => {
+            let keys = crate::config::Config::get_keys();
+            let mut values = Map::new();
+            {
+                let config = sm.config.read().await;
+                for key in &keys {
+                    if let Ok(v) = config.get_value(key) {
+                        values.insert(key.clone(), v);
+                    }
+                }
+            }
+            tx.send(json!({
+                "event": "config_list",
+                "options": values
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        _ => {
+             tx.send(json!({"error": format!("Unknown config action: {}", action)})).await.map_err(|_| anyhow!("Send failed"))?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
     match action {
         "create" => {
             let session_id = req["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;

@@ -38,6 +38,7 @@ ruster
 ## Usage
 
 Ruster communicates via JSON Lines over a UNIX socket.
+It supports a DSL-style command format for session management and configuration.
 
 ### Basic Interaction with `nc` (netcat)
 
@@ -46,19 +47,65 @@ Ruster communicates via JSON Lines over a UNIX socket.
 nc -U /tmp/ruster.sock
 ```
 
-Send a command (one JSON object per line):
+#### Session Management
+
+```json
+{
+    "command": "session",
+    "arguments": {
+        "action": "create",
+        "session_id": "test",
+        "model": "ollama/llama3.2"
+    }
+}
+
+{
+    "command": "session",
+    "arguments": {
+        "action": "send",
+        "session_id": "test",
+        "message": "Hello, who are you?"
+    }
+}
+```
+
+#### Configuration
+
+You can configure `ruster` dynamically through the socket:
+
+```json
+{
+    "command": "config",
+    "arguments": {
+        "action": "list"
+    }
+}
+
+{
+    "command": "config",
+    "arguments": {
+        "action": "set",
+        "key": "log_level",
+        "value": "debug"
+    }
+}
+
+{
+    "command": "config",
+    "arguments": {
+        "action": "get",
+        "key": "default_model"
+    }
+}
+```
+
+### Legacy Interaction (Backward Compatible)
+
+Legacy single-object commands are still supported:
 
 ```json
 {"action":"create","session_id":"test","model":"ollama/llama3.2"}
 {"action":"send","session_id":"test","message":"Hello, who are you?"}
-```
-
-You will receive streaming responses:
-
-```json
-{"event":"created","session_id":"test","model":"ollama/llama3.2"}
-{"event":"response","session_id":"test","delta":"I am ","done":false}
-{"event":"response","session_id":"test","delta":"Ruster.","done":true}
 ```
 
 ### Python Client Example

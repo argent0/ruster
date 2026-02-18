@@ -43,7 +43,37 @@ On startup if folder missing: create it + copy defaults from embedded assets.
 - Any user can connect (`nc -U /tmp/ruster.sock` works).
 - Server never closes connection unless client does; supports multiple sessions per client.
 
-**Client → Server commands**
+**Client → Server commands (DSL)**
+```json
+{
+    "command": "session",
+    "arguments": {
+        "action": "create",
+        "session_id": "work",
+        "model": "ollama/phi3"
+    }
+}
+
+{
+    "command": "session",
+    "arguments": {
+        "action": "send",
+        "session_id": "work",
+        "message": "Summarize my emails"
+    }
+}
+
+{
+    "command": "config",
+    "arguments": {
+        "action": "set",
+        "key": "log_level",
+        "value": "debug"
+    }
+}
+```
+
+**Client → Server commands (Legacy support)**
 ```json
 {"action":"create","session_id":"work","model":"ollama/phi3"} 
 {"action":"send","session_id":"work","message":"Summarize my emails"}

@@ -1,15 +1,32 @@
 use std::sync::Arc;
 use tokio::time::Duration;
+use tokio::sync::RwLock;
 use serde_json::json;
 use crate::session::SessionManager;
 use crate::config::Config;
 
-pub async fn start_proactive_loop(session_manager: Arc<SessionManager>, config: Config) {
-    let interval = Duration::from_secs(config.proactive_interval_secs);
-    let mut timer = tokio::time::interval(interval);
+pub async fn start_proactive_loop(session_manager: Arc<SessionManager>, config: Arc<RwLock<Config>>) {
+    let mut interval_secs = {
+        let cfg = config.read().await;
+        cfg.proactive_interval_secs
+    };
+    let mut timer = tokio::time::interval(Duration::from_secs(interval_secs));
 
     loop {
         timer.tick().await;
+        
+        // Check if interval changed
+        let current_interval = {
+            let cfg = config.read().await;
+            cfg.proactive_interval_secs
+        };
+        
+        if current_interval != interval_secs {
+            interval_secs = current_interval;
+            timer = tokio::time::interval(Duration::from_secs(interval_secs));
+            // Reset the timer to the new interval
+            timer.tick().await; // skip immediate tick
+        }
         
         // Logic to check internal tasks would go here.
         // For now, we simulate a proactive event.

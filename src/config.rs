@@ -2,8 +2,9 @@ use config::{Config as ConfigLoader, File};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::io::Write;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use home::home_dir;
+use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -14,6 +15,55 @@ pub struct Config {
     pub log_level: String,
     // Optional extra configuration not in spec but useful
     pub proxy_url: Option<String>,
+}
+
+impl Config {
+    pub fn get_keys() -> Vec<String> {
+        let val = serde_json::to_value(Config::default()).unwrap_or_default();
+        if let Some(obj) = val.as_object() {
+            obj.keys().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn get_value(&self, key: &str) -> Result<Value> {
+        let val = serde_json::to_value(self)?;
+        val.get(key)
+            .cloned()
+            .ok_or_else(|| anyhow!("Invalid configuration key: {}", key))
+    }
+
+    pub fn set_value(&mut self, key: &str, value: Value) -> Result<()> {
+        let mut current_val = serde_json::to_value(self.clone())?;
+        
+        if let Some(map) = current_val.as_object_mut() {
+            if !map.contains_key(key) {
+                return Err(anyhow!("Invalid configuration key: {}", key));
+            }
+            map.insert(key.to_string(), value);
+            
+            let new_config: Config = serde_json::from_value(Value::Object(map.clone()))
+                .map_err(|e| anyhow!("Invalid value for {}: {}", key, e))?;
+            
+            *self = new_config;
+            self.save()?;
+            Ok(())
+        } else {
+            Err(anyhow!("Internal error: Config is not an object"))
+        }
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let config_dir = get_config_dir()?;
+        let config_path = config_dir.join("config.toml");
+        let toml_string = toml::to_string_pretty(self)
+            .map_err(|e| anyhow!("Failed to serialize config: {}", e))?;
+        
+        let mut file = std::fs::File::create(&config_path)?;
+        file.write_all(toml_string.as_bytes())?;
+        Ok(())
+    }
 }
 
 impl Default for Config {

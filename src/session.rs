@@ -29,13 +29,13 @@ pub struct Session {
     pub activity_file: PathBuf,
     pub skills_manager: Arc<RwLock<SkillsManager>>,
     pub llm_client: LlmClient,
-    pub config: Config,
+    pub config: Arc<RwLock<Config>>,
 }
 
 impl Session {
     pub async fn new(
         id: String,
-        config: Config,
+        config: Arc<RwLock<Config>>,
         skills_manager: Arc<RwLock<SkillsManager>>,
         llm_client: LlmClient,
         model_override: Option<String>,
@@ -56,7 +56,12 @@ impl Session {
             Vec::new()
         };
 
-        let model = model_override.unwrap_or_else(|| config.default_model.clone());
+        let model = if let Some(m) = model_override {
+            m
+        } else {
+            let cfg = config.read().await;
+            cfg.default_model.clone()
+        };
 
         Ok(Self {
             id,
@@ -147,14 +152,14 @@ pub struct SessionManager {
     // Stores id -> Arc<RwLock<Session>>
     // Since we need to modify the map (add/remove), RwLock<HashMap>
     pub sessions: RwLock<HashMap<String, Arc<RwLock<Session>>>>,
-    pub config: Config,
+    pub config: Arc<RwLock<Config>>,
     pub skills_manager: Arc<RwLock<SkillsManager>>,
     pub llm_client: LlmClient,
     pub event_sender: broadcast::Sender<serde_json::Value>,
 }
 
 impl SessionManager {
-    pub fn new(config: Config, skills_manager: Arc<RwLock<SkillsManager>>, llm_client: LlmClient) -> Self {
+    pub fn new(config: Arc<RwLock<Config>>, skills_manager: Arc<RwLock<SkillsManager>>, llm_client: LlmClient) -> Self {
         let (tx, _) = broadcast::channel(100);
         Self {
             sessions: RwLock::new(HashMap::new()),

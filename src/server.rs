@@ -334,6 +334,28 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 "session_id": session_id
             })).await.map_err(|_| anyhow!("Send failed"))?;
         },
+        "history" => {
+            let session_id = req["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+            let limit = req["limit"].as_u64().unwrap_or(20) as usize;
+            let offset = req["offset"].as_u64().unwrap_or(0) as usize;
+            
+            let session_arc = sm.get_session(session_id).await?;
+            let session = session_arc.read().await;
+            
+            let total = session.history.len();
+            let start = offset.min(total);
+            let end = (offset + limit).min(total);
+            let slice = &session.history[start..end];
+            
+            tx.send(json!({
+                "event": "history",
+                "session_id": session_id,
+                "history": slice,
+                "total": total,
+                "offset": offset,
+                "limit": limit
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
         _ => {
             tx.send(json!({"error": format!("Unknown action: {}", action)})).await.map_err(|_| anyhow!("Send failed"))?;
         }

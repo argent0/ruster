@@ -249,6 +249,13 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 session.prepare_context().await?
             };
             
+            if !skills.is_empty() {
+                let names: Vec<_> = skills.iter().map(|s| &s.metadata.name).collect();
+                tracing::info!(session_id = %session_id, skills = ?names, "LLM starting generation with skills enabled.");
+            } else {
+                tracing::info!(session_id = %session_id, "LLM starting generation (no skills).");
+            }
+            
             // Notify detected skills? Spec: {"event":"skill_used",...}
             // "If relevant, execute skill(s), inject results into context".
             // "Server -> Client events ... skill_used".
@@ -294,6 +301,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                         })).await.map_err(|_| anyhow!("Send failed"))?;
                     },
                     Err(e) => {
+                        tracing::error!(session_id = %session_id, error = %e, "LLM Stream Error occurred.");
                         tx.send(json!({
                             "error": format!("LLM Stream Error: {}", e),
                             "session_id": session_id

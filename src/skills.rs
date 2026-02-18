@@ -107,6 +107,7 @@ Example: "The weather in London is 15°C and cloudy."
     }
 
     pub fn load_from_dirs(&mut self, dirs: &[String]) -> Result<()> {
+        tracing::debug!(dirs = ?dirs, "Scanning directories for skills.");
         for dir_str in dirs {
             let expanded = crate::config::expand_path(dir_str);
             let pattern = expanded.join("*").join("SKILL.md");
@@ -116,10 +117,10 @@ Example: "The weather in London is 15°C and cloudy."
                     match entry {
                         Ok(path) => {
                             if let Err(e) = self.load_skill(&path) {
-                                tracing::warn!("Failed to load skill at {:?}: {}", path, e);
+                                tracing::error!(path = %path.display(), error = %e, "Failed to load skill.");
                             }
                         },
-                        Err(e) => tracing::warn!("Glob error: {}", e),
+                        Err(e) => tracing::error!(error = %e, "Glob error when scanning for skills."),
                     }
                 }
             }
@@ -140,12 +141,12 @@ Example: "The weather in London is 15°C and cloudy."
                 if let Some(parent) = path.parent() {
                     if let Some(dir_name) = parent.file_name() {
                         if dir_name.to_string_lossy() != metadata.name {
-                             tracing::warn!("Skill folder name {:?} does not match metadata name '{}'", dir_name, &(metadata.name));
+                             tracing::warn!(dir_name = %dir_name.to_string_lossy(), metadata_name = %metadata.name, "Skill folder name does not match metadata name.");
                         }
                     }
                 }
 
-                tracing::debug!("Loading skill '{}'", &(metadata.name));
+                tracing::info!(skill = %metadata.name, "Loaded skill.");
 
                 self.skills.push(Skill {
                     path: path.parent().unwrap().to_path_buf(),
@@ -157,22 +158,27 @@ Example: "The weather in London is 15°C and cloudy."
             }
         }
         
+        tracing::error!(path = %path.display(), "Invalid SKILL.md format: missing YAML frontmatter.");
         Err(anyhow::anyhow!("Invalid SKILL.md format: missing YAML frontmatter"))
     }
 
     pub async fn select_skills(&mut self, message: &str, llm: &LlmClient, rag_model: &str) -> Result<Vec<Skill>> {
         if self.skills.is_empty() {
+            tracing::debug!("No skills available to select from.");
             return Ok(Vec::new());
         }
+
+        tracing::debug!(rag_model = %rag_model, "Starting RAG skill selection for message: '{}'", message);
 
         // 1. Get embedding for the message
         let query_embedding = match llm.embeddings(rag_model, message).await {
             Ok(emb) => emb,
             Err(e) => {
-                tracing::warn!("Failed to get query embedding: {}. Falling back to keyword search.", e);
+                tracing::warn!(error = %e, "Failed to get query embedding. Falling back to keyword search.");
                 let mut relevant = Vec::new();
                 for skill in &self.skills {
                     if message.to_lowercase().contains(&skill.metadata.name.to_lowercase()) {
+                        tracing::info!(skill = %skill.metadata.name, "Skill selected via keyword fallback.");
                         relevant.push(skill.clone());
                     }
                 }
@@ -185,12 +191,13 @@ Example: "The weather in London is 15°C and cloudy."
             let key = (rag_model.to_string(), skill.metadata.name.clone());
             if !self.embedding_cache.contains_key(&key) {
                 let text = format!("{}: {}", skill.metadata.name, skill.metadata.description);
+                tracing::debug!(skill = %skill.metadata.name, "Generating embedding for skill...");
                 match llm.embeddings(rag_model, &text).await {
                     Ok(emb) => {
                         self.embedding_cache.insert(key, emb);
                     },
                     Err(e) => {
-                        tracing::warn!("Failed to get embedding for skill '{}': {}", skill.metadata.name, e);
+                        tracing::error!(error = %e, skill = %skill.metadata.name, "Failed to get embedding for skill. Skill will be skipped in RAG search.");
                     }
                 }
             }
@@ -202,6 +209,7 @@ Example: "The weather in London is 15°C and cloudy."
             let key = (rag_model.to_string(), skill.metadata.name.clone());
             if let Some(emb) = self.embedding_cache.get(&key) {
                 let score = cosine_similarity(&query_embedding, emb);
+                tracing::debug!(skill = %skill.metadata.name, score = %score, "Computed similarity score.");
                 scores.push((skill, score));
             }
         }
@@ -211,15 +219,20 @@ Example: "The weather in London is 15°C and cloudy."
         
         let mut relevant = Vec::new();
         for (skill, score) in scores {
-            tracing::debug!("Skill '{}' score: {}", skill.metadata.name, score);
             // Threshold for relevance
             if score > 0.4 {
+                 tracing::info!(skill = %skill.metadata.name, score = %score, "Skill selected via RAG.");
                  relevant.push(skill.clone());
+            } else {
+                 tracing::debug!(skill = %skill.metadata.name, score = %score, "Skill discarded (below threshold).");
             }
         }
 
         // Limit to top 3 to keep context manageable
-        relevant.truncate(3);
+        if relevant.len() > 3 {
+            tracing::debug!("Truncating relevant skills list to top 3.");
+            relevant.truncate(3);
+        }
 
         Ok(relevant)
     }

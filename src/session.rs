@@ -102,6 +102,13 @@ impl Session {
             mgr.select_skills(&message_content, &self.llm_client, &rag_model).await?
         };
 
+        if !skills.is_empty() {
+            let names: Vec<_> = skills.iter().map(|s| &s.metadata.name).collect();
+            tracing::info!(session_id = %self.id, "Activating skills: {:?}", names);
+        } else {
+            tracing::debug!(session_id = %self.id, "No relevant skills found for message");
+        }
+
         let mut messages = Vec::new();
         
         let mut system_prompt = String::from("You are Ruster, a persistent, proactive LLM agent.\n");

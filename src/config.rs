@@ -73,7 +73,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             socket_path: "/tmp/ruster.sock".to_string(),
-            default_model: "ollama/llama3.2".to_string(),
+            default_model: "ollama/llama3.1:8b".to_string(),
             rag_model: "ollama/nomic-embed-text".to_string(),
             skills_dirs: vec![
                 "~/.config/ruster/skills".to_string(),

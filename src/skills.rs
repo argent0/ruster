@@ -82,27 +82,6 @@ Use this information whenever the user asks for the time or date.
             tracing::info!("Created default skill at {:?}", clock_dir);
         }
 
-        // Add Weather skill
-        let weather_dir = skills_dir.join("weather");
-        if !weather_dir.exists() {
-            fs::create_dir_all(&weather_dir)?;
-            let weather_md = r#"---
-name: weather
-description: Fetches weather data for a location.
----
-
-# Weather Instructions
-
-You have access to weather data (mocked).
-When the user asks for weather:
-1. Identify the location.
-2. Provide a realistic weather forecast for that location.
-Example: "The weather in London is 15°C and cloudy."
-"#;
-            fs::write(weather_dir.join("SKILL.md"), weather_md)?;
-            tracing::info!("Created default skill at {:?}", weather_dir);
-        }
-
         Ok(())
     }
 

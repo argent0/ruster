@@ -12,6 +12,8 @@ pub struct Config {
     pub default_model: String,
     pub rag_model: String,
     pub skills_dirs: Vec<String>,
+    pub initial_skills: Vec<String>,
+    pub banned_skills: Vec<String>,
     pub proactive_interval_secs: u64,
     pub log_level: String,
     // Optional extra configuration not in spec but useful
@@ -77,6 +79,8 @@ impl Default for Config {
                 "~/.config/ruster/skills".to_string(),
                 "/usr/share/ruster/skills".to_string(),
             ],
+            initial_skills: vec![],
+            banned_skills: vec![],
             proactive_interval_secs: 300,
             log_level: "info".to_string(),
             proxy_url: Some("http://localhost:8080".to_string()),

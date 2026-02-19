@@ -1,0 +1,38 @@
+warning: field `memory_dir` is never read
+  --> src/session.rs:30:9
+   |
+25 | pub struct Session {
+   |            ------- field in this struct
+...
+30 |     pub memory_dir: PathBuf,
+   |         ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `path` is never read
+  --> src/skills.rs:17:9
+   |
+16 | pub struct Skill {
+   |            ----- field in this struct
+17 |     pub path: PathBuf,
+   |         ^^^^
+   |
+   = note: `Skill` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `list_skills` is never used
+   --> src/skills.rs:175:12
+    |
+ 28 | impl SkillsManager {
+    | ------------------ method in this implementation
+...
+175 |     pub fn list_skills(&self) -> Vec<SkillMetadata> {
+    |            ^^^^^^^^^^^
+
+warning: `ruster` (bin "ruster") generated 3 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running `target/debug/ruster`
+[2m2026-02-19T15:30:54.637691Z[0m [32m INFO[0m [2mruster[0m[2m:[0m Ruster starting up...
+[2m2026-02-19T15:30:54.638003Z[0m [32m INFO[0m [2mruster::skills[0m[2m:[0m Loaded skill. [3mskill[0m[2m=[0mclock
+[2m2026-02-19T15:30:54.638090Z[0m [32m INFO[0m [2mruster::skills[0m[2m:[0m Loaded skill. [3mskill[0m[2m=[0mjoke-teller
+[2m2026-02-19T15:30:54.638213Z[0m [32m INFO[0m [2mruster::skills[0m[2m:[0m Loaded skill. [3mskill[0m[2m=[0mskill-manager
+[2m2026-02-19T15:30:54.690004Z[0m [32m INFO[0m [2mruster::server[0m[2m:[0m Listening on /tmp/ruster.sock

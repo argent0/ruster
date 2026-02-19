@@ -40,13 +40,60 @@ Delete a session and its associated data.
 - `session_id`: (string) The ID of the session to delete.
 - **Example:** `{"command": "session", "arguments": {"action": "delete", "session_id": "main"}}`
 
-#### `history` (New)
+#### `history`
 Retrieve paginated history for a session.
 - `action`: "history"
 - `session_id`: (string) The ID of the session.
 - `limit`: (optional, integer) Number of messages to return (default: 20).
 - `offset`: (optional, integer) Number of messages to skip (default: 0).
 - **Example:** `{"command": "session", "arguments": {"action": "history", "session_id": "main", "limit": 10, "offset": 0}}`
+- **Response includes:** `skills`: (array of strings) List of skills active when the message was sent/received.
+
+---
+
+### Skill Commands
+These are used with `command: "skill"`.
+
+#### `add`
+Add a skill permanently to the current session's context.
+- `action`: "add"
+- `session_id`: (string) The ID of the session.
+- `skill`: (string) The name of the skill to add.
+- **Example:** `{"command": "skill", "arguments": {"action": "add", "session_id": "main", "skill": "joke-teller"}}`
+
+#### `list`
+List all skills currently active in a session.
+- `action`: "list"
+- `session_id`: (string) The ID of the session.
+- **Example:** `{"command": "skill", "arguments": {"action": "list", "session_id": "main"}}`
+
+#### `search`
+Search for available skills using RAG.
+- `action`: "search"
+- `session_id`: (string) The ID of the session.
+- `query`: (string) The search query.
+- **Example:** `{"command": "skill", "arguments": {"action": "search", "session_id": "main", "query": "funny jokes"}}`
+
+#### `remove`
+Remove a skill from the session's active list and its message history.
+- `action`: "remove"
+- `session_id`: (string) The ID of the session.
+- `skill`: (string) The name of the skill to remove.
+- **Example:** `{"command": "skill", "arguments": {"action": "remove", "session_id": "main", "skill": "joke-teller"}}`
+
+#### `ban`
+Globally prevent a skill from being loaded or dynamically selected.
+- `action`: "ban"
+- `session_id`: (string) The ID of the session (required for context).
+- `skill`: (string) The name of the skill to ban.
+- **Example:** `{"command": "skill", "arguments": {"action": "ban", "session_id": "main", "skill": "clock"}}`
+
+#### `unban`
+Remove a skill from the global ban list.
+- `action`: "unban"
+- `session_id`: (string) The ID of the session.
+- `skill`: (string) The name of the skill to unban.
+- **Example:** `{"command": "skill", "arguments": {"action": "unban", "session_id": "main", "skill": "clock"}}`
 
 ---
 

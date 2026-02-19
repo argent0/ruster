@@ -18,11 +18,14 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 pub struct Session {
     pub id: String,
     pub history: Vec<Message>,
+    pub active_skills: Vec<String>,
     pub model: String, // provider/model
     pub memory_dir: PathBuf,
     pub history_file: PathBuf,
@@ -47,13 +50,18 @@ impl Session {
         let history_file = base_dir.join("history.jsonl");
         let activity_file = base_dir.join("activity.log");
         
-        let history = if history_file.exists() {
+        let history: Vec<Message> = if history_file.exists() {
             let content = fs::read_to_string(&history_file)?;
             content.lines()
                 .filter_map(|line| serde_json::from_str(line).ok())
                 .collect()
         } else {
             Vec::new()
+        };
+
+        let active_skills = {
+            let cfg = config.read().await;
+            cfg.initial_skills.clone()
         };
 
         let model = if let Some(m) = model_override {
@@ -66,6 +74,7 @@ impl Session {
         Ok(Self {
             id,
             history,
+            active_skills,
             model,
             memory_dir: base_dir.join("memory"),
             history_file,
@@ -76,12 +85,13 @@ impl Session {
         })
     }
 
-    pub fn add_user_message(&mut self, content: String) -> Result<()> {
+    pub fn add_user_message(&mut self, content: String, skills: Vec<String>) -> Result<()> {
         self.log_activity(&format!("User: {}", content))?;
         let msg = Message {
             role: "user".to_string(),
             content,
             timestamp: Local::now().to_rfc3339(),
+            skills,
         };
         self.history.push(msg.clone());
         self.append_history(&msg)?;
@@ -92,15 +102,34 @@ impl Session {
         // Detect skills based on last user message
         let last_msg = self.history.last().ok_or_else(|| anyhow!("No history found"))?;
         
-        let (rag_model, message_content) = {
+        let (rag_model, message_content, banned_skills) = {
             let cfg = self.config.read().await;
-            (cfg.rag_model.clone(), last_msg.content.clone())
+            (cfg.rag_model.clone(), last_msg.content.clone(), cfg.banned_skills.clone())
         };
         
-        let skills = {
+        // 1. Get manually enabled skills
+        let mut skills = Vec::new();
+        {
+            let mgr = self.skills_manager.read().await;
+            for name in &self.active_skills {
+                 if let Some(skill) = mgr.get_skill(name) {
+                     skills.push(skill.clone());
+                 }
+            }
+        }
+
+        // 2. Select dynamic skills (RAG)
+        let dynamic_skills = {
             let mut mgr = self.skills_manager.write().await;
             mgr.select_skills(&message_content, &self.llm_client, &rag_model).await?
         };
+
+        for ds in dynamic_skills {
+            // Only add if not already in active_skills and NOT banned
+            if !self.active_skills.contains(&ds.metadata.name) && !banned_skills.contains(&ds.metadata.name) {
+                skills.push(ds);
+            }
+        }
 
         if !skills.is_empty() {
             let names: Vec<_> = skills.iter().map(|s| &s.metadata.name).collect();
@@ -130,15 +159,42 @@ impl Session {
         Ok((messages, skills))
     }
 
-    pub fn add_assistant_message(&mut self, content: String) -> Result<()> {
+    pub fn add_assistant_message(&mut self, content: String, skills: Vec<String>) -> Result<()> {
         let msg = Message {
             role: "assistant".to_string(),
             content: content.clone(),
             timestamp: Local::now().to_rfc3339(),
+            skills,
         };
         self.history.push(msg.clone());
         self.append_history(&msg)?;
         self.log_activity(&format!("Assistant: {}", content))?;
+        Ok(())
+    }
+
+    pub fn add_skill(&mut self, name: String) -> Result<()> {
+        if !self.active_skills.contains(&name) {
+            self.active_skills.push(name);
+        }
+        Ok(())
+    }
+
+    pub fn remove_skill(&mut self, name: &str) -> Result<()> {
+        self.active_skills.retain(|s| s != name);
+        // Also remove from history
+        for msg in &mut self.history {
+            msg.skills.retain(|s| s != name);
+        }
+        self.rewrite_history()?;
+        Ok(())
+    }
+
+    fn rewrite_history(&self) -> Result<()> {
+        let mut file = fs::File::create(&self.history_file)?;
+        for msg in &self.history {
+            let line = serde_json::to_string(msg)?;
+            writeln!(file, "{}", line)?;
+        }
         Ok(())
     }
 

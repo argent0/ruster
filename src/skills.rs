@@ -82,6 +82,33 @@ Use this information whenever the user asks for the time or date.
             tracing::info!("Created default skill at {:?}", clock_dir);
         }
 
+        // Add Skill Manager skill
+        let manager_dir = skills_dir.join("skill-manager");
+        if !manager_dir.exists() {
+            fs::create_dir_all(&manager_dir)?;
+            let manager_md = r#"---
+name: skill-manager
+description: Manage skills in the current session. Use to add, list, search, remove, ban, or unban skills.
+---
+
+# Skill Manager Instructions
+
+You are the Skill Manager for this session. You can help the user manage their modular capabilities.
+To manage skills, tell the user to use the following commands (or explain them):
+- `skill add <name>`: Adds a skill permanently to this session's context.
+- `skill list`: Lists all skills currently active in this session.
+- `skill search <query>`: Searches for available skills using RAG.
+- `skill remove <name>`: Removes a skill from the session and its history.
+- `skill ban <name>`: Globally prevents a skill from being loaded or dynamically selected.
+- `skill unban <name>`: Removes a skill from the global ban list.
+
+Note: These are system commands that the user should send as structured requests.
+If you need a specific capability, you can ask the user to 'add' the relevant skill.
+"#;
+            fs::write(manager_dir.join("SKILL.md"), manager_md)?;
+            tracing::info!("Created default skill at {:?}", manager_dir);
+        }
+
         Ok(())
     }
 
@@ -139,6 +166,21 @@ Use this information whenever the user asks for the time or date.
         
         tracing::error!(path = %path.display(), "Invalid SKILL.md format: missing YAML frontmatter.");
         Err(anyhow::anyhow!("Invalid SKILL.md format: missing YAML frontmatter"))
+    }
+
+    pub fn get_skill(&self, name: &str) -> Option<&Skill> {
+        self.skills.iter().find(|s| s.metadata.name == name)
+    }
+
+    pub fn list_skills(&self) -> Vec<SkillMetadata> {
+        self.skills.iter().map(|s| s.metadata.name.clone()).map(|name| {
+            // Re-finding to get full metadata easily or just clone it
+            self.get_skill(&name).unwrap().metadata.clone()
+        }).collect()
+    }
+
+    pub async fn search_skills(&mut self, query: &str, llm: &LlmClient, rag_model: &str) -> Result<Vec<Skill>> {
+        self.select_skills(query, llm, rag_model).await
     }
 
     pub async fn select_skills(&mut self, message: &str, llm: &LlmClient, rag_model: &str) -> Result<Vec<Skill>> {

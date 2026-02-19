@@ -132,6 +132,10 @@ async fn process_command(req: CommandRequest, sm: Arc<SessionManager>, tx: mpsc:
                     let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in config arguments"))?;
                     handle_config_action(action, arguments.clone(), sm, tx).await
                 },
+                "skill" => {
+                    let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in skill arguments"))?;
+                    handle_skill_action(action, arguments.clone(), sm, tx).await
+                },
                 _ => {
                     tx.send(json!({"error": format!("Unknown command: {}", command)})).await.map_err(|_| anyhow!("Send failed"))?;
                     Ok(())
@@ -141,9 +145,94 @@ async fn process_command(req: CommandRequest, sm: Arc<SessionManager>, tx: mpsc:
         CommandRequest::Legacy { action, args } => {
             // Convert Map<String, Value> to Value (Object)
             let arguments = Value::Object(args);
-            handle_session_action(&action, arguments, sm, tx).await
+            if action.starts_with("skill_") {
+                let stripped = action.strip_prefix("skill_").unwrap();
+                handle_skill_action(stripped, arguments, sm, tx).await
+            } else {
+                handle_session_action(&action, arguments, sm, tx).await
+            }
         }
     }
+}
+
+async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
+    let session_id = args["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+    let session_arc = sm.get_session(session_id).await?;
+
+    match action {
+        "add" => {
+            let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            let mut session = session_arc.write().await;
+            session.add_skill(skill_name.to_string())?;
+            tx.send(json!({
+                "event": "skill_added",
+                "session_id": session_id,
+                "skill": skill_name
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "remove" => {
+            let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            let mut session = session_arc.write().await;
+            session.remove_skill(skill_name)?;
+            tx.send(json!({
+                "event": "skill_removed",
+                "session_id": session_id,
+                "skill": skill_name
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "list" => {
+             // List skills currently in session
+             let session = session_arc.read().await;
+             tx.send(json!({
+                 "event": "skill_list",
+                 "session_id": session_id,
+                 "active_skills": session.active_skills
+             })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "search" => {
+            let query = args["query"].as_str().ok_or_else(|| anyhow!("Missing query"))?;
+            let mut mgr = sm.skills_manager.write().await;
+            let results = mgr.search_skills(query, &sm.llm_client, &sm.config.read().await.rag_model).await?;
+            let metadata: Vec<_> = results.iter().map(|s| &s.metadata).collect();
+            tx.send(json!({
+                "event": "skill_search_results",
+                "session_id": session_id,
+                "results": metadata
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "ban" => {
+            let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            {
+                let mut config = sm.config.write().await;
+                if !config.banned_skills.contains(&skill_name.to_string()) {
+                    config.banned_skills.push(skill_name.to_string());
+                    config.save()?;
+                }
+            }
+            tx.send(json!({
+                "event": "skill_banned",
+                "session_id": session_id,
+                "skill": skill_name
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "unban" => {
+            let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            {
+                let mut config = sm.config.write().await;
+                config.banned_skills.retain(|s| s != skill_name);
+                config.save()?;
+            }
+            tx.send(json!({
+                "event": "skill_unbanned",
+                "session_id": session_id,
+                "skill": skill_name
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        _ => {
+            tx.send(json!({"error": format!("Unknown skill action: {}", action)})).await.map_err(|_| anyhow!("Send failed"))?;
+        }
+    }
+    Ok(())
 }
 
 async fn handle_config_action(action: &str, args: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
@@ -240,7 +329,9 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             // 1. Add user message
             {
                 let mut session = session_arc.write().await;
-                session.add_user_message(message.to_string())?;
+                // Get currently active skills to tag message
+                let current_skills = session.active_skills.clone();
+                session.add_user_message(message.to_string(), current_skills)?;
             }
             
             // 2. Prepare context (detect skills)
@@ -324,7 +415,9 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             // 4. Add assistant message
             {
                 let mut session = session_arc.write().await;
-                session.add_assistant_message(full_response)?;
+                // Current active skills might have changed? No, not during generation.
+                let current_skills = session.active_skills.clone();
+                session.add_assistant_message(full_response, current_skills)?;
             }
         },
         "list" => {

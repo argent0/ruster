@@ -26,13 +26,28 @@ enum CommandRequest {
 
 pub async fn start_server(socket_path: &str, session_manager: Arc<SessionManager>) -> Result<()> {
     if Path::new(socket_path).exists() {
-        fs::remove_file(socket_path)?;
+        if let Err(e) = fs::remove_file(socket_path) {
+            return Err(anyhow!(
+                "Failed to remove existing socket at {}: {}. \
+                 If it belongs to another user (e.g., root), try removing it with sudo.",
+                socket_path, e
+            ));
+        }
     }
 
-    let listener = UnixListener::bind(socket_path)?;
-    // Set permissions to 0666
+    let listener = UnixListener::bind(socket_path).map_err(|e| {
+        anyhow!(
+            "Failed to bind to socket {}: {}. \
+             Ensure you have write permissions to the directory.",
+            socket_path, e
+        )
+    })?;
+
+    // Set permissions to 0666 so other users can connect (if needed)
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666))?;
+    if let Err(e) = fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666)) {
+        tracing::warn!("Could not set permissions on socket {}: {}. This might prevent other users from connecting.", socket_path, e);
+    }
 
     tracing::info!("Listening on {}", socket_path);
 

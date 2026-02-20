@@ -4,6 +4,27 @@ use futures_util::StreamExt;
 use anyhow::{Result, anyhow};
 use std::pin::Pin;
 use futures_util::Stream;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value, // JSON Schema
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LlmResponse {
+    Text(String),
+    ToolCall(ToolCall),
+}
 
 #[derive(Clone)]
 pub struct LlmClient {
@@ -69,8 +90,9 @@ impl LlmClient {
         &self,
         model_str: &str,
         messages: Vec<serde_json::Value>,
+        tools: Option<Vec<Tool>>,
         _system_prompt: Option<String>, 
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponse>> + Send>>> {
         // model_str format: "provider/model_name"
         let (provider, model_name) = model_str.split_once('/')
             .ok_or_else(|| anyhow!("Invalid model format. Expected 'provider/model'"))?;
@@ -87,25 +109,50 @@ impl LlmClient {
         let payload = match provider {
             "ollama" => {
                 // Ollama format
-                json!({
+                let mut p = json!({
                     "model": model_name,
                     "messages": messages,
                     "stream": true
-                })
+                });
+                if let Some(t) = tools {
+                    let ollama_tools: Vec<_> = t.into_iter().map(|tool| {
+                        json!({
+                            "type": "function",
+                            "function": {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.parameters
+                            }
+                        })
+                    }).collect();
+                    p["tools"] = json!(ollama_tools);
+                }
+                p
             },
             "xai" => {
                 // OpenAI compatible format
-                json!({
+                let mut p = json!({
                     "model": model_name,
                     "messages": messages,
                     "stream": true
-                })
+                });
+                if let Some(t) = tools {
+                    let xai_tools: Vec<_> = t.into_iter().map(|tool| {
+                        json!({
+                            "type": "function",
+                            "function": {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.parameters
+                            }
+                        })
+                    }).collect();
+                    p["tools"] = json!(xai_tools);
+                }
+                p
             },
             "gemini" => {
                 // Gemini format
-                // Convert messages to Gemini contents
-                // This is a simplification. Real implementation needs robust mapping.
-                // Assuming messages are [{"role": "user", "content": "..."}]
                 let contents: Vec<serde_json::Value> = messages.iter().map(|m| {
                     let role = m["role"].as_str().unwrap_or("user");
                     let text = m["content"].as_str().unwrap_or("");
@@ -116,17 +163,27 @@ impl LlmClient {
                     })
                 }).collect();
 
-                json!({
+                let mut p = json!({
                     "contents": contents,
-                     // "systemInstruction": ... if supported
-                })
+                });
+
+                if let Some(t) = tools {
+                    let gemini_tools: Vec<_> = t.into_iter().map(|tool| {
+                        json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters
+                        })
+                    }).collect();
+                    p["tools"] = json!([{ "function_declarations": gemini_tools }]);
+                }
+                p
             },
             _ => unreachable!(),
         };
 
         let req = self.client.post(&url)
             .json(&payload);
-            // .header("X-Proxy-Auth", ...) // if needed, but not specified in spec config
 
         let res = req.send().await?;
         
@@ -143,17 +200,6 @@ impl LlmClient {
             let chunk = item.map_err(|e| anyhow!("Stream error: {}", e))?;
             let text = std::str::from_utf8(&chunk)?.to_string();
             
-            // Parse streaming response based on provider
-            // This is non-trivial because chunks might be partial JSON.
-            // For simplicity in this prototype, we assume line-delimited JSON or simple chunks.
-            // But Ollama returns objects.
-            // OpenAI returns SSE "data: ..."
-            // Gemini returns JSON array elements?
-            
-            // Wait, dealing with partial JSON in a stream is complex.
-            // I'll implement basic parsing assuming the chunks align with messages or use a framing helper if needed.
-            // For now, I'll just try to parse the whole chunk as a JSON object (Ollama) or parse SSE lines (xAI).
-            
             parse_chunk(&provider, &text)
         });
 
@@ -161,69 +207,77 @@ impl LlmClient {
     }
 }
 
-fn parse_chunk(provider: &str, text: &str) -> Result<String> {
-    // This is a very simplified parser.
+fn parse_chunk(provider: &str, text: &str) -> Result<LlmResponse> {
     match provider {
         "ollama" => {
-            // Ollama sends one JSON object per chunk usually, but can be partial.
-            // Assume complete JSON per chunk for now (Ollama mostly does this).
             let obj: serde_json::Value = serde_json::from_str(text)
                 .map_err(|e| anyhow!("Failed to parse Ollama chunk: {} | Text: {}", e, text))?;
             
+            if let Some(tool_calls) = obj["message"]["tool_calls"].as_array() {
+                if !tool_calls.is_empty() {
+                    let tc = &tool_calls[0]["function"];
+                    return Ok(LlmResponse::ToolCall(ToolCall {
+                        id: "ollama".to_string(), // Ollama doesn't always provide IDs in chunks?
+                        name: tc["name"].as_str().unwrap_or_default().to_string(),
+                        arguments: tc["arguments"].to_string(),
+                    }));
+                }
+            }
+
             if let Some(content) = obj["message"]["content"].as_str() {
-                Ok(content.to_string())
-            } else if obj["done"].as_bool() == Some(true) {
-                Ok("".to_string())
+                Ok(LlmResponse::Text(content.to_string()))
             } else {
-                Ok("".to_string())
+                Ok(LlmResponse::Text("".to_string()))
             }
         },
         "xai" => {
-             // SSE: "data: {...}"
-             // Need to strip "data: " and parse.
-             // Text might contain multiple lines.
              let mut content = String::new();
              for line in text.lines() {
                  if line.starts_with("data: ") {
                      let json_str = &line[6..];
                      if json_str == "[DONE]" { continue; }
                      if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+                         if let Some(tool_calls) = obj["choices"][0]["delta"]["tool_calls"].as_array() {
+                             if !tool_calls.is_empty() {
+                                 let tc = &tool_calls[0];
+                                 let func = &tc["function"];
+                                 return Ok(LlmResponse::ToolCall(ToolCall {
+                                     id: tc["id"].as_str().unwrap_or_default().to_string(),
+                                     name: func["name"].as_str().unwrap_or_default().to_string(),
+                                     arguments: func["arguments"].as_str().unwrap_or_default().to_string(),
+                                 }));
+                             }
+                         }
+
                          if let Some(c) = obj["choices"][0]["delta"]["content"].as_str() {
                              content.push_str(c);
                          }
                      }
                  }
              }
-             Ok(content)
+             Ok(LlmResponse::Text(content))
         },
         "gemini" => {
-            // Gemini streams a JSON array. "[{{...}},\\r\\n"
-            // This is hard to parse without a proper streaming parser.
-            // Spec says "Implement exactly as defined in proxy.md".
-            // Proxy.md just shows `println!("Chunk: {:?}", chunk);`.
-            
-            // I'll try to parse assuming clean chunks or just returning raw text if debugging.
-            // But valid JSON parsing is required for the agent to work.
-            
-            // Gemini response: `{"candidates": [{"content": {"parts": [{"text": "..."}]}}]}`
-            // Often comes as a full array in one go if not careful? No, it's streaming.
-            // It sends `,\\r\\n` between items.
-            
-            // Simplest hack: Try to find "text": "..." using regex?
-            // Or use a proper crate `json-stream`? No, stick to std.
-            
-            // Let's use regex for robustness against partial JSON.
-            // Regex: `"text":\\s*"(.*?)"` (unescaping needed).
-            
-            // For now, I'll attempt `serde_json::from_str` on the chunk (trimming comma).
             let text_trimmed = text.trim().trim_start_matches(',').trim();
              if let Ok(obj) = serde_json::from_str::<serde_json::Value>(text_trimmed) {
-                 if let Some(c) = obj["candidates"][0]["content"]["parts"][0]["text"].as_str() {
-                     return Ok(c.to_string());
+                 if let Some(parts) = obj["candidates"][0]["content"]["parts"].as_array() {
+                     for part in parts {
+                         if let Some(call) = part["functionCall"].as_object() {
+                             return Ok(LlmResponse::ToolCall(ToolCall {
+                                 id: "gemini".to_string(),
+                                 name: call["name"].as_str().unwrap_or_default().to_string(),
+                                 arguments: call["args"].to_string(),
+                             }));
+                         }
+                         if let Some(t) = part["text"].as_str() {
+                             return Ok(LlmResponse::Text(t.to_string()));
+                         }
+                     }
                  }
              }
-             Ok("".to_string())
+             Ok(LlmResponse::Text("".to_string()))
         },
-        _ => Ok("".to_string())
+        _ => Ok(LlmResponse::Text("".to_string()))
     }
 }
+

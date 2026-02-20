@@ -105,7 +105,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn prepare_context(&self) -> Result<(Vec<serde_json::Value>, Vec<Skill>)> {
+    pub async fn prepare_context(&self) -> Result<(Vec<serde_json::Value>, Vec<Skill>, Vec<crate::llm::Tool>)> {
         // Detect skills based on last user message
         let last_msg = self.history.last().ok_or_else(|| anyhow!("No history found"))?;
         
@@ -138,6 +138,11 @@ impl Session {
             }
         }
 
+        let mut tools = Vec::new();
+        for skill in &skills {
+            tools.extend(skill.metadata.tools.clone());
+        }
+
         if !skills.is_empty() {
             let names: Vec<_> = skills.iter().map(|s| &s.metadata.name).collect();
             tracing::info!(session_id = %self.id, "Activating skills: {:?}", names);
@@ -163,7 +168,7 @@ impl Session {
             messages.push(json!({"role": msg.role, "content": msg.content}));
         }
 
-        Ok((messages, skills))
+        Ok((messages, skills, tools))
     }
 
     pub fn add_assistant_message(&mut self, content: String, skills: Vec<String>) -> Result<()> {

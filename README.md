@@ -169,6 +169,39 @@ Keep it short and punchy.
 
 When you ask Ruster for a joke, it will detect this skill, inject these instructions into the context, and the LLM will follow them.
 
+## Tool Calling (Function Calling)
+
+Ruster supports structured tool calling for LLMs that support it (Ollama, xAI, Gemini). Skills can define tools in their `SKILL.md` frontmatter.
+
+### Example Tool Definition in `SKILL.md`
+
+```yaml
+---
+name: clock
+description: Fetches current date and time.
+tools:
+  - name: get_current_time
+    description: Returns the current system time.
+    parameters:
+      type: object
+      properties: {}
+---
+```
+
+When an LLM requests a tool call, Ruster emits a `tool_call` event over the socket:
+
+```json
+{
+  "event": "tool_call",
+  "session_id": "test",
+  "tool": "get_current_time",
+  "arguments": "{}",
+  "call_id": "call_abc123"
+}
+```
+
+Clients can then execute the tool and (in future updates) provide the result back to the session.
+
 ## Configuration
 
 Configuration is located at `~/.config/ruster/config.toml`.

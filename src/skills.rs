@@ -10,6 +10,8 @@ use crate::llm::LlmClient;
 pub struct SkillMetadata {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub tools: Vec<crate::llm::Tool>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,12 @@ Keep it short and punchy.
             let clock_md = format!(r#"---
 name: clock
 description: Fetches current date and time.
+tools:
+  - name: get_current_time
+    description: Returns the current system time.
+    parameters:
+      type: object
+      properties: {{}}
 ---
 
 # Clock Instructions

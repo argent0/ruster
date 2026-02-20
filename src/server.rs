@@ -367,7 +367,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             }
             
             // 2. Prepare context (detect skills)
-            let (context, skills) = {
+            let (context, skills, tools) = {
                 let session = session_arc.read().await;
                 session.prepare_context().await?
             };
@@ -379,10 +379,6 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 tracing::info!(session_id = %session_id, "LLM starting generation (no skills).");
             }
             
-            // Notify detected skills? Spec: {"event":"skill_used",...}
-            // "If relevant, execute skill(s), inject results into context".
-            // "Server -> Client events ... skill_used".
-            // Since we just inject instructions, maybe we emit "skill_used" here.
             for skill in &skills {
                 tracing::debug!(session_id = %session_id, skill = %skill.metadata.name, "Skill instructions injected into context");
                 tx.send(json!({
@@ -401,10 +397,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             
             tracing::info!(session_id = %session_id, model = %model_str, "Starting LLM stream");
             
-            // Note: process_command is async, holding session_arc might block others if we held lock.
-            // But we dropped locks.
-            
-            let mut stream = sm.llm_client.chat_stream(&model_str, context, None).await?;
+            let mut stream = sm.llm_client.chat_stream(&model_str, context, if tools.is_empty() { None } else { Some(tools) }, None).await?;
             
             let mut full_response = String::new();
             
@@ -417,14 +410,32 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             
             while let Some(chunk_res) = stream.next().await {
                 match chunk_res {
-                    Ok(chunk) => {
-                        full_response.push_str(&chunk);
-                        tx.send(json!({
-                            "event": "response",
-                            "session_id": session_id,
-                            "delta": chunk,
-                            "done": false
-                        })).await.map_err(|_| anyhow!("Send failed"))?;
+                    Ok(response) => {
+                        match response {
+                            crate::llm::LlmResponse::Text(chunk) => {
+                                full_response.push_str(&chunk);
+                                tx.send(json!({
+                                    "event": "response",
+                                    "session_id": session_id,
+                                    "delta": chunk,
+                                    "done": false
+                                })).await.map_err(|_| anyhow!("Send failed"))?;
+                            },
+                            crate::llm::LlmResponse::ToolCall(call) => {
+                                tracing::info!(session_id = %session_id, tool = %call.name, "LLM requested tool call");
+                                tx.send(json!({
+                                    "event": "tool_call",
+                                    "session_id": session_id,
+                                    "tool": call.name,
+                                    "arguments": call.arguments,
+                                    "call_id": call.id
+                                })).await.map_err(|_| anyhow!("Send failed"))?;
+                                
+                                // In a full implementation, we'd execute the tool here and continue the conversation.
+                                // For now, we'll just log it and maybe stop or send a placeholder.
+                                full_response.push_str(&format!("\n[Tool Call: {} with arguments {}]", call.name, call.arguments));
+                            }
+                        }
                     },
                     Err(e) => {
                         tracing::error!(session_id = %session_id, error = %e, "LLM Stream Error occurred.");
@@ -442,17 +453,13 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             tx.send(json!({
                 "event": "response",
                 "session_id": session_id,
-                "delta": "", // Final delta empty? Or "Final answer."? Spec says "delta":"Final answer.","done":true
-                // But we streamed the answer.
-                // Usually "done":true comes with empty delta or just marks end.
-                // I'll send empty delta with done=true.
+                "delta": "", 
                 "done": true
             })).await.map_err(|_| anyhow!("Send failed"))?;
             
             // 4. Add assistant message
             {
                 let mut session = session_arc.write().await;
-                // Current active skills might have changed? No, not during generation.
                 let current_skills = session.active_skills.clone();
                 session.add_assistant_message(full_response, current_skills)?;
             }

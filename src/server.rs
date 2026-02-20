@@ -9,6 +9,10 @@ use crate::session::SessionManager;
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::Path;
+use uuid::Uuid;
+use std::process::Stdio;
+use tokio::process::Command;
+use std::io::Write as _;
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
@@ -22,6 +26,93 @@ enum CommandRequest {
         #[serde(flatten)]
         args: Map<String, Value>,
     },
+}
+
+async fn execute_tool(
+    call: crate::llm::ToolCall,
+    tools: &[crate::llm::Tool],
+    config: &crate::config::Config,
+    user_msg: &str,
+    assistant_resp: &str,
+) -> Result<(String, String)> {
+    let tool_uuid = Uuid::new_v4().to_string();
+    let tool_run_dir = Path::new(&config.tool_run_dir).join("tools").join(&tool_uuid);
+    fs::create_dir_all(&tool_run_dir)?;
+
+    let call_log_path = tool_run_dir.join("call");
+    let mut call_log = fs::File::create(call_log_path)?;
+    writeln!(call_log, "Timestamp: {}", chrono::Local::now())?;
+    writeln!(call_log, "Tool Call UUID: {}", tool_uuid)?;
+    writeln!(call_log, "Tool Name: {}", call.name)?;
+    writeln!(call_log, "Arguments: {}", call.arguments)?;
+    writeln!(call_log, "User Message: {}", user_msg)?;
+    writeln!(call_log, "Assistant Response: {}", assistant_resp)?;
+
+    let stdout_all;
+    let mut stderr_all = String::new();
+
+    if call.name == "paginate_tool_output" {
+        let args: Value = serde_json::from_str(&call.arguments)?;
+        let target_uuid = args["tool_call_uuid"].as_str().ok_or_else(|| anyhow!("Missing tool_call_uuid"))?;
+        let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = args["limit"].as_u64().unwrap_or(config.tool_output_lines as u64) as usize;
+        let search = args["search"].as_str();
+
+        let target_stdout_path = Path::new(&config.tool_run_dir).join("tools").join(target_uuid).join("stdout");
+        if !target_stdout_path.exists() {
+            return Ok((tool_uuid, format!("Error: Tool run {} not found.", target_uuid)));
+        }
+
+        let content = fs::read_to_string(target_stdout_path)?;
+        let mut lines: Vec<_> = content.lines().collect();
+        
+        if let Some(term) = search {
+            lines.retain(|l| l.contains(term));
+        }
+
+        let total = lines.len();
+        let start = offset.min(total);
+        let end = (offset + limit).min(total);
+        let sliced = &lines[start..end];
+
+        let mut res = sliced.join("\n");
+        if end < total {
+            res.push_str(&format!("\n\n(Showing lines {}-{} of {}. Use paginate_tool_output for more.)", start, end, total));
+        }
+        stdout_all = res;
+    } else if let Some(tool_def) = tools.iter().find(|t| t.name == call.name) {
+        if let Some(exec_cmd) = &tool_def.exec {
+            let child = Command::new("bash")
+                .arg("-c")
+                .arg(exec_cmd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+
+            let output = child.wait_with_output().await?;
+            stdout_all = String::from_utf8_lossy(&output.stdout).to_string();
+            stderr_all = String::from_utf8_lossy(&output.stderr).to_string();
+        } else {
+            stdout_all = format!("Error: Tool {} has no execution logic defined.", call.name);
+        }
+    } else {
+        stdout_all = format!("Error: Tool {} not found.", call.name);
+    }
+
+    fs::write(tool_run_dir.join("stdout"), &stdout_all)?;
+    fs::write(tool_run_dir.join("stderr"), &stderr_all)?;
+
+    let mut result_summary = stdout_all.lines().take(config.tool_output_lines).collect::<Vec<_>>().join("\n");
+    if stdout_all.lines().count() > config.tool_output_lines {
+        result_summary.push_str(&format!("\n\n(Output truncated. Full output saved in tool run {}. Use paginate_tool_output to see more.)", tool_uuid));
+    }
+
+    if !stderr_all.is_empty() {
+        result_summary.push_str("\n\nStderr:\n");
+        result_summary.push_str(&stderr_all.lines().take(5).collect::<Vec<_>>().join("\n"));
+    }
+
+    Ok((tool_uuid, result_summary))
 }
 
 pub async fn start_server(socket_path: &str, session_manager: Arc<SessionManager>) -> Result<()> {
@@ -397,7 +488,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             
             tracing::info!(session_id = %session_id, model = %model_str, "Starting LLM stream");
             
-            let mut stream = sm.llm_client.chat_stream(&model_str, context, if tools.is_empty() { None } else { Some(tools) }, None).await?;
+            let mut stream = sm.llm_client.chat_stream(&model_str, context, if tools.is_empty() { None } else { Some(tools.clone()) }, None).await?;
             
             let mut full_response = String::new();
             
@@ -423,17 +514,23 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                             },
                             crate::llm::LlmResponse::ToolCall(call) => {
                                 tracing::info!(session_id = %session_id, tool = %call.name, "LLM requested tool call");
+                                
+                                let config = sm.config.read().await.clone();
+                                let (tool_uuid, result) = match execute_tool(call.clone(), &tools, &config, message, &full_response).await {
+                                    Ok(res) => res,
+                                    Err(e) => (Uuid::new_v4().to_string(), format!("Error executing tool: {}", e)),
+                                };
+
                                 tx.send(json!({
                                     "event": "tool_call",
                                     "session_id": session_id,
                                     "tool": call.name,
                                     "arguments": call.arguments,
-                                    "call_id": call.id
+                                    "call_id": tool_uuid,
+                                    "result_preview": result
                                 })).await.map_err(|_| anyhow!("Send failed"))?;
                                 
-                                // In a full implementation, we'd execute the tool here and continue the conversation.
-                                // For now, we'll just log it and maybe stop or send a placeholder.
-                                full_response.push_str(&format!("\n[Tool Call: {} with arguments {}]", call.name, call.arguments));
+                                full_response.push_str(&format!("\n[Tool Call: {} (ID: {}) resulted in:\n{}]", call.name, tool_uuid, result));
                             }
                         }
                     },

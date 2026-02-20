@@ -171,24 +171,32 @@ When you ask Ruster for a joke, it will detect this skill, inject these instruct
 
 ## Tool Calling (Function Calling)
 
-Ruster supports structured tool calling for LLMs that support it (Ollama, xAI, Gemini). Skills can define tools in their `SKILL.md` frontmatter.
+Ruster supports structured tool calling for LLMs that support it (Ollama, xAI, Gemini). Skills can define tools in their `SKILL.md` frontmatter, including execution logic.
 
 ### Example Tool Definition in `SKILL.md`
 
 ```yaml
 ---
 name: clock
-description: Fetches current date and time.
+description: Fetches current date and time using system tools.
 tools:
   - name: get_current_time
     description: Returns the current system time.
     parameters:
       type: object
       properties: {}
+    exec: "date '+%A, %B %d, %Y %H:%M:%S %Z'"
 ---
 ```
 
-When an LLM requests a tool call, Ruster emits a `tool_call` event over the socket:
+### Execution and Logging
+
+When an LLM requests a tool call, Ruster:
+1. Assigns a unique **UUID** to the call.
+2. Executes the command specified in the `exec` field (via `bash -c`).
+3. Logs the call details, `stdout`, and `stderr` to `/tmp/ruster.run/tools/<uuid>/`.
+4. Injects the first **10 lines** (configurable) of the output back into the conversation.
+5. Emits a `tool_call` event over the socket:
 
 ```json
 {
@@ -196,11 +204,14 @@ When an LLM requests a tool call, Ruster emits a `tool_call` event over the sock
   "session_id": "test",
   "tool": "get_current_time",
   "arguments": "{}",
-  "call_id": "call_abc123"
+  "call_id": "550e8400-e29b-41d4-a716-446655440000",
+  "result_preview": "Friday, February 20, 2026 13:00:00 UTC"
 }
 ```
 
-Clients can then execute the tool and (in future updates) provide the result back to the session.
+### Pagination
+
+If a tool produces large output, Ruster provides a built-in `paginate_tool_output` tool. The agent can use this tool to request more lines, search for specific terms, or view a different range of the captured `stdout`.
 
 ## Configuration
 
@@ -209,12 +220,16 @@ Defaults are created on first run.
 
 ```toml
 socket_path = "/tmp/ruster.sock"
-default_model = "ollama/llama3.2"
+default_model = "ollama/llama3.1:8b"
+rag_model = "ollama/nomic-embed-text"
 skills_dirs = ["~/.config/ruster/skills", "/usr/share/ruster/skills"]
 proactive_interval_secs = 300
 log_level = "info"
+tool_run_dir = "/tmp/ruster.run"
+tool_output_lines = 10
 proxy_url = "http://localhost:8080" # Optional: URL to LLM proxy or provider
 ```
+
 
 ## Proactivity
 

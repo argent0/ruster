@@ -16,6 +16,8 @@ pub struct Config {
     pub banned_skills: Vec<String>,
     pub proactive_interval_secs: u64,
     pub log_level: String,
+    pub tool_run_dir: String,
+    pub tool_output_lines: usize,
     // Optional extra configuration not in spec but useful
     pub proxy_url: Option<String>,
 }
@@ -83,6 +85,8 @@ impl Default for Config {
             banned_skills: vec![],
             proactive_interval_secs: 300,
             log_level: "info".to_string(),
+            tool_run_dir: "/tmp/ruster.run".to_string(),
+            tool_output_lines: 10,
             proxy_url: Some("http://localhost:8080".to_string()),
         }
     }

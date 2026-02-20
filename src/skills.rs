@@ -78,6 +78,7 @@ tools:
     parameters:
       type: object
       properties: {}
+    exec: "date '+%A, %B %d, %Y %H:%M:%S %Z'"
 ---
 
 # Clock Instructions

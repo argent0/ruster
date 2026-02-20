@@ -11,6 +11,8 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value, // JSON Schema
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

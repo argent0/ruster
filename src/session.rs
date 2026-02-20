@@ -143,6 +143,35 @@ impl Session {
             tools.extend(skill.metadata.tools.clone());
         }
 
+        // Add built-in pagination tool
+        tools.push(crate::llm::Tool {
+            name: "paginate_tool_output".to_string(),
+            description: "Paginates the output of a previous tool call. Use this to see more lines, a specific range, or search for text in the full output of a tool.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "tool_call_uuid": {
+                        "type": "string",
+                        "description": "The UUID of the tool call to paginate."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Starting line number (0-indexed)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of lines to return."
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Optional search term to filter lines."
+                    }
+                },
+                "required": ["tool_call_uuid"]
+            }),
+            exec: None, // Built-in
+        });
+
         if !skills.is_empty() {
             let names: Vec<_> = skills.iter().map(|s| &s.metadata.name).collect();
             tracing::info!(session_id = %self.id, "Activating skills: {:?}", names);

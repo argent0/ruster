@@ -69,6 +69,8 @@ pub async fn start_server(socket_path: &str, session_manager: Arc<SessionManager
 }
 
 async fn handle_connection(stream: UnixStream, session_manager: Arc<SessionManager>) -> Result<()> {
+    let peer_addr = stream.peer_addr().ok();
+    tracing::info!(peer_addr = ?peer_addr, "New connection established");
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
     
@@ -114,8 +116,12 @@ async fn handle_connection(stream: UnixStream, session_manager: Arc<SessionManag
         if line.trim().is_empty() { continue; }
         
         let req: CommandRequest = match serde_json::from_str(&line) {
-            Ok(v) => v,
+            Ok(v) => {
+                tracing::debug!(peer_addr = ?peer_addr, "Received command");
+                v
+            },
             Err(e) => {
+                tracing::warn!(peer_addr = ?peer_addr, error = %e, line = %line, "Received invalid JSON");
                 let _ = tx.send(json!({"error": format!("Invalid JSON or Command format: {}", e)})).await;
                 continue;
             }
@@ -132,6 +138,7 @@ async fn handle_connection(stream: UnixStream, session_manager: Arc<SessionManag
         });
     }
 
+    tracing::info!(peer_addr = ?peer_addr, "Connection closed");
     Ok(())
 }
 
@@ -172,11 +179,13 @@ async fn process_command(req: CommandRequest, sm: Arc<SessionManager>, tx: mpsc:
 
 async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
     let session_id = args["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+    tracing::info!(session_id = %session_id, action = %action, "Processing skill action");
     let session_arc = sm.get_session(session_id).await?;
 
     match action {
         "add" => {
             let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            tracing::info!(session_id = %session_id, skill = %skill_name, "Adding skill to session");
             let mut session = session_arc.write().await;
             session.add_skill(skill_name.to_string())?;
             tx.send(json!({
@@ -187,6 +196,7 @@ async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>,
         },
         "remove" => {
             let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            tracing::info!(session_id = %session_id, skill = %skill_name, "Removing skill from session");
             let mut session = session_arc.write().await;
             session.remove_skill(skill_name)?;
             tx.send(json!({
@@ -197,6 +207,7 @@ async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>,
         },
         "list" => {
              // List skills currently in session
+             tracing::debug!(session_id = %session_id, "Listing session skills");
              let session = session_arc.read().await;
              tx.send(json!({
                  "event": "skill_list",
@@ -206,6 +217,7 @@ async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>,
         },
         "search" => {
             let query = args["query"].as_str().ok_or_else(|| anyhow!("Missing query"))?;
+            tracing::info!(session_id = %session_id, query = %query, "Searching for skills");
             let mut mgr = sm.skills_manager.write().await;
             let results = mgr.search_skills(query, &sm.llm_client, &sm.config.read().await.rag_model).await?;
             let metadata: Vec<_> = results.iter().map(|s| &s.metadata).collect();
@@ -217,6 +229,7 @@ async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>,
         },
         "ban" => {
             let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            tracing::info!(skill = %skill_name, "Banning skill globally");
             {
                 let mut config = sm.config.write().await;
                 if !config.banned_skills.contains(&skill_name.to_string()) {
@@ -232,6 +245,7 @@ async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>,
         },
         "unban" => {
             let skill_name = args["skill"].as_str().ok_or_else(|| anyhow!("Missing skill name"))?;
+            tracing::info!(skill = %skill_name, "Unbanning skill globally");
             {
                 let mut config = sm.config.write().await;
                 config.banned_skills.retain(|s| s != skill_name);
@@ -304,9 +318,11 @@ async fn handle_config_action(action: &str, args: Value, sm: Arc<SessionManager>
 }
 
 async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
+    tracing::info!(action = %action, "Processing session action");
     match action {
         "create" => {
             let session_id = req["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+            tracing::info!(session_id = %session_id, "Creating/loading session");
             let model = req["model"].as_str(); // Optional override
             
             // Check if exists
@@ -339,6 +355,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             let session_id = req["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
             let message = req["message"].as_str().ok_or_else(|| anyhow!("Missing message"))?;
             
+            tracing::info!(session_id = %session_id, "Handling message send");
             let session_arc = sm.get_session(session_id).await?;
             
             // 1. Add user message
@@ -367,6 +384,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             // "Server -> Client events ... skill_used".
             // Since we just inject instructions, maybe we emit "skill_used" here.
             for skill in &skills {
+                tracing::debug!(session_id = %session_id, skill = %skill.metadata.name, "Skill instructions injected into context");
                 tx.send(json!({
                     "event": "skill_used",
                     "session_id": session_id,
@@ -380,6 +398,8 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 let session = session_arc.read().await;
                 session.model.clone()
             };
+            
+            tracing::info!(session_id = %session_id, model = %model_str, "Starting LLM stream");
             
             // Note: process_command is async, holding session_arc might block others if we held lock.
             // But we dropped locks.
@@ -416,6 +436,8 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                     }
                 }
             }
+            
+            tracing::info!(session_id = %session_id, response_len = %full_response.len(), "LLM stream completed");
             
             tx.send(json!({
                 "event": "response",

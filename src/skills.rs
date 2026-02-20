@@ -189,11 +189,14 @@ If you need a specific capability, you can ask the user to 'add' the relevant sk
             return Ok(Vec::new());
         }
 
-        tracing::debug!(rag_model = %rag_model, "Starting RAG skill selection for message: '{}'", message);
+        tracing::info!(rag_model = %rag_model, message_len = %message.len(), "Starting RAG skill selection");
 
         // 1. Get embedding for the message
         let query_embedding = match llm.embeddings(rag_model, message).await {
-            Ok(emb) => emb,
+            Ok(emb) => {
+                tracing::debug!("Successfully obtained message embedding");
+                emb
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to get query embedding. Falling back to keyword search.");
                 let mut relevant = Vec::new();

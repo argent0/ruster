@@ -43,6 +43,7 @@ impl Session {
         llm_client: LlmClient,
         model_override: Option<String>,
     ) -> Result<Self> {
+        tracing::info!(session_id = %id, "Initializing session");
         let base_dir = crate::logging::get_log_dir()?.parent().unwrap().join("sessions").join(&id);
         fs::create_dir_all(&base_dir)?;
         fs::create_dir_all(base_dir.join("memory"))?;
@@ -51,11 +52,13 @@ impl Session {
         let activity_file = base_dir.join("activity.log");
         
         let history: Vec<Message> = if history_file.exists() {
+            tracing::debug!(session_id = %id, "Loading history from {:?}", history_file);
             let content = fs::read_to_string(&history_file)?;
             content.lines()
                 .filter_map(|line| serde_json::from_str(line).ok())
                 .collect()
         } else {
+            tracing::debug!(session_id = %id, "No history file found, starting new history");
             Vec::new()
         };
 
@@ -65,11 +68,15 @@ impl Session {
         };
 
         let model = if let Some(m) = model_override {
+            tracing::debug!(session_id = %id, model = %m, "Using model override");
             m
         } else {
             let cfg = config.read().await;
+            tracing::debug!(session_id = %id, model = %cfg.default_model, "Using default model from config");
             cfg.default_model.clone()
         };
+
+        tracing::info!(session_id = %id, history_len = %history.len(), active_skills_count = %active_skills.len(), "Session initialized");
 
         Ok(Self {
             id,

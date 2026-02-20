@@ -599,16 +599,30 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                     "content": if current_text.is_empty() { Value::Null } else { json!(current_text) }
                 });
                 
+                let provider = model_str.split('/').next().unwrap_or("");
                 let tool_calls_json: Vec<_> = tool_calls_this_turn.iter().map(|tc| {
-                    // OpenAI/xAI expects arguments as a JSON string, not an object.
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments
-                        }
-                    })
+                    if provider == "ollama" || provider == "gemini" {
+                        // Ollama and Gemini expect arguments as a JSON object.
+                        let args_value: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!(tc.arguments));
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": args_value
+                            }
+                        })
+                    } else {
+                        // OpenAI/xAI expects arguments as a JSON string, not an object.
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments
+                            }
+                        })
+                    }
                 }).collect();
                 assistant_msg["tool_calls"] = json!(tool_calls_json);
                 context.push(assistant_msg);

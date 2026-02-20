@@ -173,7 +173,11 @@ impl LlmClient {
                                 parts.push(json!({
                                     "functionCall": {
                                         "name": func["name"],
-                                        "args": serde_json::from_str::<serde_json::Value>(func["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}))
+                                        "args": if func["arguments"].is_string() {
+                                            serde_json::from_str::<serde_json::Value>(func["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}))
+                                        } else {
+                                            func["arguments"].clone()
+                                        }
                                     }
                                 }));
                             }

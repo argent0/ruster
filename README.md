@@ -99,15 +99,6 @@ You can configure `ruster` dynamically through the socket:
 }
 ```
 
-### Legacy Interaction (Backward Compatible)
-
-Legacy single-object commands are still supported:
-
-```json
-{"action":"create","session_id":"test","model":"ollama/llama3.2"}
-{"action":"send","session_id":"test","message":"Hello, who are you?"}
-```
-
 ### Python Client Example
 
 ```python
@@ -118,8 +109,7 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect("/tmp/ruster.sock")
 
 def send(cmd):
-    sock.sendall((json.dumps(cmd) + "
-").encode())
+    sock.sendall((json.dumps(cmd) + "\n").encode())
 
 def listen():
     buffer = ""
@@ -127,18 +117,29 @@ def listen():
         chunk = sock.recv(4096).decode()
         if not chunk: break
         buffer += chunk
-        while "
-" in buffer:
-            line, buffer = buffer.split("
-", 1)
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
             if not line: continue
             print("Received:", line)
 
 # Create session
-send({"action": "create", "session_id": "py-session"})
+send({
+    "command": "session",
+    "arguments": {
+        "action": "create",
+        "session_id": "py-session"
+    }
+})
 
 # Send message
-send({"action": "send", "session_id": "py-session", "message": "Tell me a joke"})
+send({
+    "command": "session",
+    "arguments": {
+        "action": "send",
+        "session_id": "py-session",
+        "message": "Tell me a joke"
+    }
+})
 
 listen()
 ```

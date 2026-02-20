@@ -15,17 +15,9 @@ use tokio::process::Command;
 use std::io::Write as _;
 
 #[derive(Deserialize, Debug)]
-#[serde(untagged)]
-enum CommandRequest {
-    Dsl {
-        command: String,
-        arguments: Value,
-    },
-    Legacy {
-        action: String,
-        #[serde(flatten)]
-        args: Map<String, Value>,
-    },
+struct CommandRequest {
+    command: String,
+    arguments: Value,
 }
 
 async fn execute_tool(
@@ -234,36 +226,24 @@ async fn handle_connection(stream: UnixStream, session_manager: Arc<SessionManag
 }
 
 async fn process_command(req: CommandRequest, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
-    match req {
-        CommandRequest::Dsl { command, arguments } => {
-            match command.as_str() {
-                "session" => {
-                    let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in session arguments"))?;
-                    handle_session_action(action, arguments.clone(), sm, tx).await
-                },
-                "config" => {
-                    let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in config arguments"))?;
-                    handle_config_action(action, arguments.clone(), sm, tx).await
-                },
-                "skill" => {
-                    let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in skill arguments"))?;
-                    handle_skill_action(action, arguments.clone(), sm, tx).await
-                },
-                _ => {
-                    tx.send(json!({"error": format!("Unknown command: {}", command)})).await.map_err(|_| anyhow!("Send failed"))?;
-                    Ok(())
-                }
-            }
+    let command = req.command;
+    let arguments = req.arguments;
+    match command.as_str() {
+        "session" => {
+            let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in session arguments"))?;
+            handle_session_action(action, arguments.clone(), sm, tx).await
         },
-        CommandRequest::Legacy { action, args } => {
-            // Convert Map<String, Value> to Value (Object)
-            let arguments = Value::Object(args);
-            if action.starts_with("skill_") {
-                let stripped = action.strip_prefix("skill_").unwrap();
-                handle_skill_action(stripped, arguments, sm, tx).await
-            } else {
-                handle_session_action(&action, arguments, sm, tx).await
-            }
+        "config" => {
+            let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in config arguments"))?;
+            handle_config_action(action, arguments.clone(), sm, tx).await
+        },
+        "skill" => {
+            let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in skill arguments"))?;
+            handle_skill_action(action, arguments.clone(), sm, tx).await
+        },
+        _ => {
+            tx.send(json!({"error": format!("Unknown command: {}", command)})).await.map_err(|_| anyhow!("Send failed"))?;
+            Ok(())
         }
     }
 }

@@ -1,19 +1,15 @@
 # Ruster Commands Documentation
 
-Ruster supports two command formats: DSL format and Legacy format.
+Ruster uses a DSL-style command format for all interactions.
 
-## DSL Format
+## Command Format
 All commands are sent as JSON objects with `command` and `arguments` keys.
 Example: `{"command": "session", "arguments": {"action": "list"}}`
-
-## Legacy Format
-Legacy commands are sent as JSON objects with `action` and any other required arguments as top-level keys.
-Example: `{"action": "list"}`
 
 ---
 
 ### Session Commands
-These are used with `command: "session"` or as Legacy actions.
+These are used with `command: "session"`.
 
 #### `create`
 Create a new session or switch to an existing one.

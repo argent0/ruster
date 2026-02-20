@@ -600,13 +600,13 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 });
                 
                 let tool_calls_json: Vec<_> = tool_calls_this_turn.iter().map(|tc| {
-                    let args_value: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!(tc.arguments));
+                    // OpenAI/xAI expects arguments as a JSON string, not an object.
                     json!({
                         "id": tc.id,
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": args_value
+                            "arguments": tc.arguments
                         }
                     })
                 }).collect();

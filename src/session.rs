@@ -170,6 +170,34 @@ impl Session {
                 "required": ["tool_call_uuid"]
             }),
             exec: None, // Built-in
+            working_dir: None,
+        });
+
+        // Add run_skill_script tool
+        tools.push(crate::llm::Tool {
+            name: "run_skill_script".to_string(),
+            description: "Executes a script from an active skill's 'scripts' directory. Provide the skill name, script name (with extension), and an optional 'args' array.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "The name of the skill containing the script."
+                    },
+                    "script_name": {
+                        "type": "string",
+                        "description": "The name of the script file (e.g., 'browser-active.sh')."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Arguments to pass to the script."
+                    }
+                },
+                "required": ["skill_name", "script_name"]
+            }),
+            exec: None, // Built-in logic in server.rs
+            working_dir: None,
         });
 
         if !skills.is_empty() {

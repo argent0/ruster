@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use anyhow::Result;
 use glob::glob;
 use crate::llm::LlmClient;
@@ -149,20 +150,27 @@ If you need a specific capability, you can ask the user to 'add' the relevant sk
                 let frontmatter = &content[3..3+end];
                 let body = &content[3+end+3..];
 
-                let metadata: SkillMetadata = serde_yaml::from_str(frontmatter)?;
+                let mut metadata: SkillMetadata = serde_yaml::from_str(frontmatter)?;
                 
-                if let Some(parent) = path.parent() {
-                    if let Some(dir_name) = parent.file_name() {
-                        if dir_name.to_string_lossy() != metadata.name {
-                             tracing::warn!(dir_name = %dir_name.to_string_lossy(), metadata_name = %metadata.name, "Skill folder name does not match metadata name.");
-                        }
+                let skill_path = path.parent().unwrap().to_path_buf();
+                
+                // Set working_dir for tools if not already set
+                for tool in &mut metadata.tools {
+                    if tool.exec.is_some() && tool.working_dir.is_none() {
+                        tool.working_dir = Some(skill_path.to_string_lossy().to_string());
+                    }
+                }
+
+                if let Some(dir_name) = path.parent().and_then(|p| p.file_name()) {
+                    if dir_name.to_string_lossy() != metadata.name {
+                         tracing::warn!(dir_name = %dir_name.to_string_lossy(), metadata_name = %metadata.name, "Skill folder name does not match metadata name.");
                     }
                 }
 
                 tracing::info!(skill = %metadata.name, "Loaded skill.");
 
                 self.skills.push(Skill {
-                    path: path.parent().unwrap().to_path_buf(),
+                    path: skill_path,
                     metadata,
                     instructions: body.trim().to_string(),
                 });

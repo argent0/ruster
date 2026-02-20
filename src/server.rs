@@ -23,12 +23,14 @@ struct CommandRequest {
 async fn execute_tool(
     call: crate::llm::ToolCall,
     tools: &[crate::llm::Tool],
+    skills: &[crate::skills::Skill],
     config: &crate::config::Config,
     user_msg: &str,
     assistant_resp: &str,
 ) -> Result<(String, String)> {
     let tool_uuid = Uuid::new_v4().to_string();
-    let tool_run_dir = Path::new(&config.tool_run_dir).join("tools").join(&tool_uuid);
+    let expanded_tool_run_dir = crate::config::expand_path(&config.tool_run_dir);
+    let tool_run_dir = expanded_tool_run_dir.join("tools").join(&tool_uuid);
     fs::create_dir_all(&tool_run_dir)?;
 
     let call_log_path = tool_run_dir.join("call");
@@ -50,7 +52,7 @@ async fn execute_tool(
         let limit = args["limit"].as_u64().unwrap_or(config.tool_output_lines as u64) as usize;
         let search = args["search"].as_str();
 
-        let target_stdout_path = Path::new(&config.tool_run_dir).join("tools").join(target_uuid).join("stdout");
+        let target_stdout_path = expanded_tool_run_dir.join("tools").join(target_uuid).join("stdout");
         if !target_stdout_path.exists() {
             return Ok((tool_uuid, format!("Error: Tool run {} not found.", target_uuid)));
         }
@@ -72,11 +74,66 @@ async fn execute_tool(
             res.push_str(&format!("\n\n(Showing lines {}-{} of {}. Use paginate_tool_output for more.)", start, end, total));
         }
         stdout_all = res;
+    } else if call.name == "run_skill_script" {
+        let args: Value = serde_json::from_str(&call.arguments)?;
+        let skill_name = args["skill_name"].as_str().ok_or_else(|| anyhow!("Missing skill_name"))?;
+        let script_name = args["script_name"].as_str().ok_or_else(|| anyhow!("Missing script_name"))?;
+        
+        if let Some(skill) = skills.iter().find(|s| s.metadata.name == skill_name) {
+            let script_path = skill.path.join("scripts").join(script_name);
+            if !script_path.exists() {
+                return Ok((tool_uuid, format!("Error: Script '{}' not found in skill '{}'.", script_name, skill_name)));
+            }
+
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c");
+            
+            let mut full_cmd = format!("./scripts/{}", script_name);
+            if let Some(args_arr) = args["args"].as_array() {
+                for arg in args_arr {
+                    if let Some(s) = arg.as_str() {
+                        full_cmd.push(' ');
+                        full_cmd.push_str(&format!("'{}'", s.replace("'", "'\\''")));
+                    }
+                }
+            }
+            cmd.arg(full_cmd);
+            cmd.current_dir(&skill.path);
+
+            let child = cmd
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+
+            let output = child.wait_with_output().await?;
+            stdout_all = String::from_utf8_lossy(&output.stdout).to_string();
+            stderr_all = String::from_utf8_lossy(&output.stderr).to_string();
+        } else {
+            return Ok((tool_uuid, format!("Error: Skill '{}' not found or not active.", skill_name)));
+        }
     } else if let Some(tool_def) = tools.iter().find(|t| t.name == call.name) {
         if let Some(exec_cmd) = &tool_def.exec {
-            let child = Command::new("bash")
-                .arg("-c")
-                .arg(exec_cmd)
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c");
+            
+            let mut full_cmd = exec_cmd.clone();
+            let args_json: Value = serde_json::from_str(&call.arguments).unwrap_or(json!({}));
+            if let Some(args_arr) = args_json["args"].as_array() {
+                for arg in args_arr {
+                    if let Some(s) = arg.as_str() {
+                        full_cmd.push(' ');
+                        // Basic shell escaping: wrap in single quotes and escape any single quotes within the string
+                        full_cmd.push_str(&format!("'{}'", s.replace("'", "'\\''")));
+                    }
+                }
+            }
+            cmd.arg(full_cmd);
+            
+            if let Some(cwd) = &tool_def.working_dir {
+                cmd.current_dir(cwd);
+            }
+
+            let child = cmd
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?;
@@ -460,68 +517,129 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 })).await.map_err(|_| anyhow!("Send failed"))?;
             }
 
-            // 3. Call LLM stream
+            // 3. Call LLM stream (with tool loop)
             let model_str = {
                 let session = session_arc.read().await;
                 session.model.clone()
             };
             
-            tracing::info!(session_id = %session_id, model = %model_str, "Starting LLM stream");
-            
-            let mut stream = sm.llm_client.chat_stream(&model_str, context, if tools.is_empty() { None } else { Some(tools.clone()) }, None).await?;
-            
+            let mut context = context;
             let mut full_response = String::new();
-            
-            tx.send(json!({
-                "event": "response",
-                "session_id": session_id,
-                "delta": "Thinking...",
-                "done": false
-            })).await.map_err(|_| anyhow!("Send failed"))?;
-            
-            while let Some(chunk_res) = stream.next().await {
-                match chunk_res {
-                    Ok(response) => {
-                        match response {
-                            crate::llm::LlmResponse::Text(chunk) => {
-                                full_response.push_str(&chunk);
-                                tx.send(json!({
-                                    "event": "response",
-                                    "session_id": session_id,
-                                    "delta": chunk,
-                                    "done": false
-                                })).await.map_err(|_| anyhow!("Send failed"))?;
-                            },
-                            crate::llm::LlmResponse::ToolCall(call) => {
-                                tracing::info!(session_id = %session_id, tool = %call.name, "LLM requested tool call");
-                                
-                                let config = sm.config.read().await.clone();
-                                let (tool_uuid, result) = match execute_tool(call.clone(), &tools, &config, message, &full_response).await {
-                                    Ok(res) => res,
-                                    Err(e) => (Uuid::new_v4().to_string(), format!("Error executing tool: {}", e)),
-                                };
+            let mut iteration = 0;
+            let max_iterations = 10;
 
-                                tx.send(json!({
-                                    "event": "tool_call",
-                                    "session_id": session_id,
-                                    "tool": call.name,
-                                    "arguments": call.arguments,
-                                    "call_id": tool_uuid,
-                                    "result_preview": result
-                                })).await.map_err(|_| anyhow!("Send failed"))?;
-                                
-                                full_response.push_str(&format!("\n[Tool Call: {} (ID: {}) resulted in:\n{}]", call.name, tool_uuid, result));
+            loop {
+                iteration += 1;
+                if iteration > max_iterations {
+                    tracing::warn!(session_id = %session_id, "Max tool iterations reached");
+                    break;
+                }
+
+                tracing::info!(session_id = %session_id, iteration = %iteration, model = %model_str, "Starting LLM stream");
+                
+                let mut stream = sm.llm_client.chat_stream(&model_str, context.clone(), if tools.is_empty() { None } else { Some(tools.clone()) }, None).await?;
+                
+                let mut current_text = String::new();
+                let mut tool_calls_this_turn = Vec::<crate::llm::ToolCall>::new();
+
+                tx.send(json!({
+                    "event": "response",
+                    "session_id": session_id,
+                    "delta": if iteration == 1 { "Thinking..." } else { "Refining..." },
+                    "done": false
+                })).await.map_err(|_| anyhow!("Send failed"))?;
+                
+                while let Some(chunk_res) = stream.next().await {
+                    match chunk_res {
+                        Ok(response) => {
+                            match response {
+                                crate::llm::LlmResponse::Text(chunk) => {
+                                    current_text.push_str(&chunk);
+                                    tx.send(json!({
+                                        "event": "response",
+                                        "session_id": session_id,
+                                        "delta": chunk,
+                                        "done": false
+                                    })).await.map_err(|_| anyhow!("Send failed"))?;
+                                },
+                                crate::llm::LlmResponse::ToolCall(mut call) => {
+                                    // Ensure unique ID for tool call if provider doesn't give one
+                                    if call.id == "ollama" || call.id == "gemini" || call.id.is_empty() {
+                                        call.id = format!("call_{}", Uuid::new_v4().to_string()[..8].to_string());
+                                    }
+                                    tool_calls_this_turn.push(call);
+                                }
                             }
+                        },
+                        Err(e) => {
+                            tracing::error!(session_id = %session_id, error = %e, "LLM Stream Error occurred.");
+                            tx.send(json!({
+                                "error": format!("LLM Stream Error: {}", e),
+                                "session_id": session_id
+                            })).await.map_err(|_| anyhow!("Send failed"))?;
+                            return Err(e);
                         }
-                    },
-                    Err(e) => {
-                        tracing::error!(session_id = %session_id, error = %e, "LLM Stream Error occurred.");
-                        tx.send(json!({
-                            "error": format!("LLM Stream Error: {}", e),
-                            "session_id": session_id
-                        })).await.map_err(|_| anyhow!("Send failed"))?;
-                        break;
                     }
+                }
+
+                if !current_text.is_empty() {
+                    if !full_response.is_empty() {
+                        full_response.push_str("\n");
+                    }
+                    full_response.push_str(&current_text);
+                }
+
+                if tool_calls_this_turn.is_empty() {
+                    break;
+                }
+
+                // Add assistant's tool calls to context
+                let mut assistant_msg = json!({
+                    "role": "assistant",
+                    "content": if current_text.is_empty() { Value::Null } else { json!(current_text) }
+                });
+                
+                let tool_calls_json: Vec<_> = tool_calls_this_turn.iter().map(|tc| {
+                    let args_value: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!(tc.arguments));
+                    json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": args_value
+                        }
+                    })
+                }).collect();
+                assistant_msg["tool_calls"] = json!(tool_calls_json);
+                context.push(assistant_msg);
+
+                // Execute tools and add results to context
+                for call in tool_calls_this_turn {
+                    tracing::info!(session_id = %session_id, tool = %call.name, "LLM requested tool call");
+                    
+                    let config = sm.config.read().await.clone();
+                    let (tool_uuid, result) = match execute_tool(call.clone(), &tools, &skills, &config, message, &full_response).await {
+                        Ok(res) => res,
+                        Err(e) => (Uuid::new_v4().to_string(), format!("Error executing tool: {}", e)),
+                    };
+
+                    tx.send(json!({
+                        "event": "tool_call",
+                        "session_id": session_id,
+                        "tool": call.name,
+                        "arguments": call.arguments,
+                        "call_id": tool_uuid,
+                        "result_preview": result
+                    })).await.map_err(|_| anyhow!("Send failed"))?;
+                    
+                    full_response.push_str(&format!("\n[Tool Call: {} (ID: {}) resulted in:\n{}]", call.name, tool_uuid, result));
+
+                    context.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "content": result
+                    }));
                 }
             }
             

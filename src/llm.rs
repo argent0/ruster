@@ -13,6 +13,8 @@ pub struct Tool {
     pub parameters: serde_json::Value, // JSON Schema
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,10 +159,42 @@ impl LlmClient {
                 // Gemini format
                 let contents: Vec<serde_json::Value> = messages.iter().map(|m| {
                     let role = m["role"].as_str().unwrap_or("user");
-                    let text = m["content"].as_str().unwrap_or("");
-                    let parts = vec![json!({"text": text})];
+                    let mut parts = Vec::new();
+
+                    if let Some(content) = m["content"].as_str() {
+                        if !content.is_empty() {
+                            parts.push(json!({"text": content}));
+                        }
+                    }
+
+                    if let Some(tool_calls) = m["tool_calls"].as_array() {
+                        for tc in tool_calls {
+                            if let Some(func) = tc["function"].as_object() {
+                                parts.push(json!({
+                                    "functionCall": {
+                                        "name": func["name"],
+                                        "args": serde_json::from_str::<serde_json::Value>(func["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}))
+                                    }
+                                }));
+                            }
+                        }
+                    }
+
+                    if role == "tool" {
+                        parts.push(json!({
+                            "functionResponse": {
+                                "name": m["name"],
+                                "response": { "result": m["content"] }
+                            }
+                        }));
+                    }
+
                     json!({
-                        "role": if role == "assistant" { "model" } else { "user" },
+                        "role": match role {
+                            "assistant" => "model",
+                            "tool" => "function",
+                            _ => "user"
+                        },
                         "parts": parts
                     })
                 }).collect();

@@ -97,6 +97,13 @@ async fn main() -> Result<()> {
     {
         let cfg = config_arc.read().await;
         let _ = std::fs::remove_file(&cfg.socket_path);
+        
+        // Remove tool_run_dir
+        let tool_run_path = crate::config::expand_path(&cfg.tool_run_dir);
+        if tool_run_path.exists() {
+            tracing::info!("Removing tool run directory: {:?}", tool_run_path);
+            let _ = std::fs::remove_dir_all(&tool_run_path);
+        }
     }
     tracing::info!("Shutdown complete.");
 

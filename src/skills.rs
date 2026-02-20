@@ -68,27 +68,25 @@ Keep it short and punchy.
 
         // Add Clock skill
         let clock_dir = skills_dir.join("clock");
-        if !clock_dir.exists() {
-            fs::create_dir_all(&clock_dir)?;
-            let clock_md = format!(r#"---
+        fs::create_dir_all(&clock_dir)?;
+        let clock_md = r#"---
 name: clock
-description: Fetches current date and time.
+description: Fetches current date and time using system tools.
 tools:
   - name: get_current_time
     description: Returns the current system time.
     parameters:
       type: object
-      properties: {{}}
+      properties: {}
 ---
 
 # Clock Instructions
 
-The current system time is: {}.
-Use this information whenever the user asks for the time or date.
-"#, chrono::Local::now().to_rfc2822());
-            fs::write(clock_dir.join("SKILL.md"), clock_md)?;
-            tracing::info!("Created default skill at {:?}", clock_dir);
-        }
+Whenever the user asks for the current time or date, you MUST use the `get_current_time` tool to fetch the most up-to-date information.
+Do not rely on your internal knowledge or the time the message was sent.
+"#;
+        fs::write(clock_dir.join("SKILL.md"), clock_md)?;
+        tracing::info!("Updated default skill at {:?}", clock_dir);
 
         // Add Skill Manager skill
         let manager_dir = skills_dir.join("skill-manager");

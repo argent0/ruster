@@ -18,6 +18,8 @@ pub struct Config {
     pub log_level: String,
     pub tool_run_dir: String,
     pub tool_output_lines: usize,
+    pub rag_top_n: usize,
+    pub rag_threshold: f32,
     // Optional extra configuration not in spec but useful
     pub proxy_url: Option<String>,
 }
@@ -87,6 +89,8 @@ impl Default for Config {
             log_level: "info".to_string(),
             tool_run_dir: "/tmp/ruster.run".to_string(),
             tool_output_lines: 10,
+            rag_top_n: 3,
+            rag_threshold: 0.4,
             proxy_url: Some("http://localhost:8080".to_string()),
         }
     }

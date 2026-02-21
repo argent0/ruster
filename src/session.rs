@@ -92,13 +92,36 @@ impl Session {
         })
     }
 
-    pub fn add_user_message(&mut self, content: String, skills: Vec<String>) -> Result<()> {
+    pub async fn add_user_message(&mut self, content: String, _skills: Vec<String>) -> Result<()> {
+        let (rag_model, rag_top_n, rag_threshold, banned_skills) = {
+            let cfg = self.config.read().await;
+            (cfg.rag_model.clone(), cfg.rag_top_n, cfg.rag_threshold, cfg.banned_skills.clone())
+        };
+
+        // Select dynamic skills (RAG)
+        let dynamic_skills = {
+            let mut mgr = self.skills_manager.write().await;
+            mgr.select_skills(&content, &self.llm_client, &rag_model, rag_top_n, rag_threshold).await?
+        };
+
+        let mut discovered_skills = Vec::new();
+        for ds in dynamic_skills {
+            let name = ds.metadata.name.clone();
+            if !banned_skills.contains(&name) {
+                discovered_skills.push(name.clone());
+                if !self.active_skills.contains(&name) {
+                    tracing::info!(session_id = %self.id, skill = %name, "Dynamically loading skill into session.");
+                    self.active_skills.push(name);
+                }
+            }
+        }
+
         self.log_activity(&format!("User: {}", content))?;
         let msg = Message {
             role: "user".to_string(),
             content,
             timestamp: Local::now().to_rfc3339(),
-            skills,
+            skills: discovered_skills,
         };
         self.history.push(msg.clone());
         self.append_history(&msg)?;
@@ -106,15 +129,6 @@ impl Session {
     }
 
     pub async fn prepare_context(&self) -> Result<(Vec<serde_json::Value>, Vec<Skill>, Vec<crate::llm::Tool>)> {
-        // Detect skills based on last user message
-        let last_msg = self.history.last().ok_or_else(|| anyhow!("No history found"))?;
-        
-        let (rag_model, message_content, banned_skills) = {
-            let cfg = self.config.read().await;
-            (cfg.rag_model.clone(), last_msg.content.clone(), cfg.banned_skills.clone())
-        };
-        
-        // 1. Get manually enabled skills
         let mut skills = Vec::new();
         {
             let mgr = self.skills_manager.read().await;
@@ -122,19 +136,6 @@ impl Session {
                  if let Some(skill) = mgr.get_skill(name) {
                      skills.push(skill.clone());
                  }
-            }
-        }
-
-        // 2. Select dynamic skills (RAG)
-        let dynamic_skills = {
-            let mut mgr = self.skills_manager.write().await;
-            mgr.select_skills(&message_content, &self.llm_client, &rag_model).await?
-        };
-
-        for ds in dynamic_skills {
-            // Only add if not already in active_skills and NOT banned
-            if !self.active_skills.contains(&ds.metadata.name) && !banned_skills.contains(&ds.metadata.name) {
-                skills.push(ds);
             }
         }
 

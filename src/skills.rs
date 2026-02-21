@@ -194,17 +194,17 @@ If you need a specific capability, you can ask the user to 'add' the relevant sk
         }).collect()
     }
 
-    pub async fn search_skills(&mut self, query: &str, llm: &LlmClient, rag_model: &str) -> Result<Vec<Skill>> {
-        self.select_skills(query, llm, rag_model).await
+    pub async fn search_skills(&mut self, query: &str, llm: &LlmClient, rag_model: &str, top_n: usize, threshold: f32) -> Result<Vec<Skill>> {
+        self.select_skills(query, llm, rag_model, top_n, threshold).await
     }
 
-    pub async fn select_skills(&mut self, message: &str, llm: &LlmClient, rag_model: &str) -> Result<Vec<Skill>> {
+    pub async fn select_skills(&mut self, message: &str, llm: &LlmClient, rag_model: &str, top_n: usize, threshold: f32) -> Result<Vec<Skill>> {
         if self.skills.is_empty() {
             tracing::debug!("No skills available to select from.");
             return Ok(Vec::new());
         }
 
-        tracing::info!(rag_model = %rag_model, message_len = %message.len(), "Starting RAG skill selection");
+        tracing::info!(rag_model = %rag_model, message_len = %message.len(), top_n = %top_n, threshold = %threshold, "Starting RAG skill selection");
 
         // 1. Get embedding for the message
         let query_embedding = match llm.embeddings(rag_model, message).await {
@@ -259,7 +259,7 @@ If you need a specific capability, you can ask the user to 'add' the relevant sk
         let mut relevant = Vec::new();
         for (skill, score) in scores {
             // Threshold for relevance
-            if score > 0.4 {
+            if score > threshold {
                  tracing::info!(skill = %skill.metadata.name, score = %score, "Skill selected via RAG.");
                  relevant.push(skill.clone());
             } else {
@@ -267,10 +267,10 @@ If you need a specific capability, you can ask the user to 'add' the relevant sk
             }
         }
 
-        // Limit to top 3 to keep context manageable
-        if relevant.len() > 3 {
-            tracing::debug!("Truncating relevant skills list to top 3.");
-            relevant.truncate(3);
+        // Limit to top_n to keep context manageable
+        if relevant.len() > top_n {
+            tracing::debug!(top_n = %top_n, "Truncating relevant skills list.");
+            relevant.truncate(top_n);
         }
 
         Ok(relevant)

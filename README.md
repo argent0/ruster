@@ -146,8 +146,17 @@ listen()
 
 ## Skills
 
-Ruster automatically discovers skills in `~/.config/ruster/skills/`.
-A skill is a directory containing a `SKILL.md` file.
+Ruster follows the **Agent Skills** open standard. It automatically discovers skills in `~/.config/ruster/skills/` and other configured directories. A skill is a directory containing a `SKILL.md` file with metadata and instructions.
+
+### Automatic Skill Selection (RAG)
+
+For **each user message**, Ruster performs a **RAG-based search** over the metadata (name + description) of all available skills. It then:
+1.  Identifies the most relevant skills (up to `rag_top_n` that are above `rag_threshold`).
+2.  **Dynamically loads** these skills into the current session.
+3.  Injects the full instructions of all loaded skills into the LLM's context.
+4.  Persists the discovered skills in the message history for that turn.
+
+Once a skill is loaded into a session (either via RAG or manually), it stays "active" for the duration of that session, ensuring the agent retains the capability as needed. You can manage these skills using the `skill` commands (add, list, search, remove, ban, unban).
 
 ### Example: `~/.config/ruster/skills/joke-teller/SKILL.md`
 
@@ -223,6 +232,8 @@ Defaults are created on first run.
 socket_path = "/tmp/ruster.sock"
 default_model = "ollama/llama3.1:8b"
 rag_model = "ollama/nomic-embed-text"
+rag_top_n = 3
+rag_threshold = 0.4
 skills_dirs = ["~/.config/ruster/skills", "/usr/share/ruster/skills"]
 proactive_interval_secs = 300
 log_level = "info"

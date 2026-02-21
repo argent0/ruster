@@ -43,7 +43,7 @@ Retrieve paginated history for a session.
 - `limit`: (optional, integer) Number of messages to return (default: 20).
 - `offset`: (optional, integer) Number of messages to skip (default: 0).
 - **Example:** `{"command": "session", "arguments": {"action": "history", "session_id": "main", "limit": 10, "offset": 0}}`
-- **Response includes:** `skills`: (array of strings) List of skills active when the message was sent/received.
+- **Response includes:** `skills`: (array of strings) List of skills discovered via RAG for that user message or previously active in the session.
 
 ---
 
@@ -51,20 +51,20 @@ Retrieve paginated history for a session.
 These are used with `command: "skill"`.
 
 #### `add`
-Add a skill permanently to the current session's context.
+Add a skill manually and permanently to the current session's context.
 - `action`: "add"
 - `session_id`: (string) The ID of the session.
 - `skill`: (string) The name of the skill to add.
 - **Example:** `{"command": "skill", "arguments": {"action": "add", "session_id": "main", "skill": "joke-teller"}}`
 
 #### `list`
-List all skills currently active in a session.
+List all skills currently loaded (manually or via RAG) in a session.
 - `action`: "list"
 - `session_id`: (string) The ID of the session.
 - **Example:** `{"command": "skill", "arguments": {"action": "list", "session_id": "main"}}`
 
 #### `search`
-Search for available skills using RAG.
+Search for available skills using RAG (manual discovery). Note: RAG search happens automatically for each `session send` message.
 - `action`: "search"
 - `session_id`: (string) The ID of the session.
 - `query`: (string) The search query.

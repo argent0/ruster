@@ -347,7 +347,11 @@ async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>,
             let query = args["query"].as_str().ok_or_else(|| anyhow!("Missing query"))?;
             tracing::info!(session_id = %session_id, query = %query, "Searching for skills");
             let mut mgr = sm.skills_manager.write().await;
-            let results = mgr.search_skills(query, &sm.llm_client, &sm.config.read().await.rag_model).await?;
+            let (rag_model, top_n, threshold) = {
+                let cfg = sm.config.read().await;
+                (cfg.rag_model.clone(), cfg.rag_top_n, cfg.rag_threshold)
+            };
+            let results = mgr.search_skills(query, &sm.llm_client, &rag_model, top_n, threshold).await?;
             let metadata: Vec<_> = results.iter().map(|s| &s.metadata).collect();
             tx.send(json!({
                 "event": "skill_search_results",
@@ -491,7 +495,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
                 let mut session = session_arc.write().await;
                 // Get currently active skills to tag message
                 let current_skills = session.active_skills.clone();
-                session.add_user_message(message.to_string(), current_skills)?;
+                session.add_user_message(message.to_string(), current_skills).await?;
             }
             
             // 2. Prepare context (detect skills)

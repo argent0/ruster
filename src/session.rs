@@ -6,12 +6,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use chrono::Local;
 use anyhow::{Result, anyhow};
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::skills::{SkillsManager, Skill};
+use crate::servers::{EventDeliveryMode, ServerRegistry};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -22,14 +23,46 @@ pub struct Message {
     pub skills: Vec<String>,
 }
 
+pub struct RateLimiter {
+    pub tokens: f64,
+    pub last_update: std::time::Instant,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self {
+            tokens: 10.0,
+            last_update: std::time::Instant::now(),
+        }
+    }
+
+    pub fn check(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * 5.0).min(10.0);
+        self.last_update = now;
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub struct Session {
     pub id: String,
     pub history: Vec<Message>,
     pub active_skills: Vec<String>,
+    pub attached_servers: HashMap<String, EventDeliveryMode>,
+    pub pending_events: Vec<serde_json::Value>,
+    pub rate_limiters: HashMap<String, RateLimiter>,
     pub model: String, // provider/model
     pub memory_dir: PathBuf,
     pub history_file: PathBuf,
     pub activity_file: PathBuf,
+    pub attached_servers_file: PathBuf,
     pub skills_manager: Arc<RwLock<SkillsManager>>,
     pub llm_client: LlmClient,
     pub config: Arc<RwLock<Config>>,
@@ -50,6 +83,7 @@ impl Session {
 
         let history_file = base_dir.join("history.jsonl");
         let activity_file = base_dir.join("activity.log");
+        let attached_servers_file = base_dir.join("attached_servers.toml");
         
         let history: Vec<Message> = if history_file.exists() {
             tracing::debug!(session_id = %id, "Loading history from {:?}", history_file);
@@ -60,6 +94,13 @@ impl Session {
         } else {
             tracing::debug!(session_id = %id, "No history file found, starting new history");
             Vec::new()
+        };
+
+        let attached_servers: HashMap<String, EventDeliveryMode> = if attached_servers_file.exists() {
+            let content = fs::read_to_string(&attached_servers_file)?;
+            toml::from_str(&content).unwrap_or_default()
+        } else {
+            HashMap::new()
         };
 
         let active_skills = {
@@ -82,14 +123,43 @@ impl Session {
             id,
             history,
             active_skills,
+            attached_servers,
+            pending_events: Vec::new(),
+            rate_limiters: HashMap::new(),
             model,
             memory_dir: base_dir.join("memory"),
             history_file,
             activity_file,
+            attached_servers_file,
             skills_manager,
             llm_client,
             config,
         })
+    }
+
+    pub fn save_attachments(&self) -> Result<()> {
+        let content = toml::to_string(&self.attached_servers)?;
+        fs::write(&self.attached_servers_file, content)?;
+        Ok(())
+    }
+
+    pub fn attach_server(&mut self, name: String, mode: EventDeliveryMode) -> Result<()> {
+        self.attached_servers.insert(name, mode);
+        self.save_attachments()
+    }
+
+    pub fn detach_server(&mut self, name: &str) -> Result<()> {
+        self.attached_servers.remove(name);
+        self.save_attachments()
+    }
+
+    pub fn subscribe_server(&mut self, name: String, mode: EventDeliveryMode) -> Result<()> {
+        if self.attached_servers.contains_key(&name) {
+            self.attached_servers.insert(name, mode);
+            self.save_attachments()
+        } else {
+            Err(anyhow!("Server not attached"))
+        }
     }
 
     pub async fn add_user_message(&mut self, content: String, _skills: Vec<String>) -> Result<()> {
@@ -128,7 +198,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn prepare_context(&self) -> Result<(Vec<serde_json::Value>, Vec<Skill>, Vec<crate::llm::Tool>)> {
+    pub async fn prepare_context(&mut self) -> Result<(Vec<serde_json::Value>, Vec<Skill>, Vec<crate::llm::Tool>)> {
         let mut skills = Vec::new();
         {
             let mgr = self.skills_manager.read().await;
@@ -222,11 +292,32 @@ impl Session {
         
         messages.push(json!({"role": "system", "content": system_prompt}));
         
+        // Add pending events as system messages and clear them
+        for event in self.pending_events.drain(..) {
+             messages.push(json!({
+                 "role": "system",
+                 "content": format!("Background Event: {}", serde_json::to_string(&event).unwrap_or_default())
+             }));
+        }
+
         for msg in &self.history {
             messages.push(json!({"role": msg.role, "content": msg.content}));
         }
 
         Ok((messages, skills, tools))
+    }
+
+    pub fn add_server_message(&mut self, server_name: &str, content: Value) -> Result<()> {
+        let msg = Message {
+            role: server_name.to_string(),
+            content: content.to_string(),
+            timestamp: Local::now().to_rfc3339(),
+            skills: Vec::new(),
+        };
+        self.history.push(msg.clone());
+        self.append_history(&msg)?;
+        self.log_activity(&format!("{}: {}", server_name, content))?;
+        Ok(())
     }
 
     pub fn add_assistant_message(&mut self, content: String, skills: Vec<String>) -> Result<()> {
@@ -296,10 +387,16 @@ pub struct SessionManager {
     pub skills_manager: Arc<RwLock<SkillsManager>>,
     pub llm_client: LlmClient,
     pub event_sender: broadcast::Sender<serde_json::Value>,
+    pub server_registry: Arc<ServerRegistry>,
 }
 
 impl SessionManager {
-    pub fn new(config: Arc<RwLock<Config>>, skills_manager: Arc<RwLock<SkillsManager>>, llm_client: LlmClient) -> Self {
+    pub fn new(
+        config: Arc<RwLock<Config>>,
+        skills_manager: Arc<RwLock<SkillsManager>>,
+        llm_client: LlmClient,
+        server_registry: Arc<ServerRegistry>,
+    ) -> Self {
         let (tx, _) = broadcast::channel(100);
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -307,7 +404,86 @@ impl SessionManager {
             skills_manager,
             llm_client,
             event_sender: tx,
+            server_registry,
         }
+    }
+
+    pub async fn handle_server_reply(&self, session_id: &str, server_name: &str, reply: Value) -> Result<()> {
+        let session_arc = self.get_session(session_id).await?;
+        let mut session = session_arc.write().await;
+        session.add_server_message(server_name, reply.clone())?;
+        
+        // Notify client via broadcast
+        let _ = self.event_sender.send(json!({
+            "event": "server_reply",
+            "session_id": session_id,
+            "server_name": server_name,
+            "content": reply
+        }));
+        Ok(())
+    }
+
+    pub async fn handle_server_event(&self, server_name: &str, event: Value) -> Result<()> {
+        let sessions = self.sessions.read().await;
+        for (session_id, session_arc) in sessions.iter() {
+            let mut session = session_arc.write().await;
+            if let Some(mode) = session.attached_servers.get(server_name).cloned() {
+                // Rate limiting
+                let limiter = session.rate_limiters.entry(server_name.to_string()).or_insert_with(RateLimiter::new);
+                if !limiter.check() {
+                    // Send rate limit event to client via broadcast
+                    let _ = self.event_sender.send(json!({
+                        "event": "rate_limited",
+                        "session_id": session_id,
+                        "server_name": server_name,
+                        "dropped": 1
+                    }));
+                    continue;
+                }
+
+                match mode {
+                    EventDeliveryMode::Immediate => {
+                        // Add to history and trigger LLM (immediate implies it should generate response)
+                        // Actually, just adding it to history might not be enough if we want immediate generation.
+                        // The spec says: Event added as {"role":server_name, "content":...} -> LLM immediately generates reply
+                        // This means we need to trigger the "send" logic but with no new user message.
+                        
+                        session.add_server_message(server_name, event.clone())?;
+                        
+                        // To trigger LLM, we can send a special internal event or just call a method.
+                        // For now, let's just broadcast that a server event happened.
+                        let _ = self.event_sender.send(json!({
+                            "event": "server_event",
+                            "session_id": session_id,
+                            "server_name": server_name,
+                            "content": event,
+                            "delivery": "immediate"
+                        }));
+                    }
+                    EventDeliveryMode::Proactive => {
+                        // For proactive, we just broadcast it, and proactive loop can pick it up.
+                         let _ = self.event_sender.send(json!({
+                            "event": "server_event",
+                            "session_id": session_id,
+                            "server_name": server_name,
+                            "content": event,
+                            "delivery": "proactive"
+                        }));
+                    }
+                    EventDeliveryMode::NextTurn => {
+                        session.pending_events.push(event.clone());
+                         let _ = self.event_sender.send(json!({
+                            "event": "server_event",
+                            "session_id": session_id,
+                            "server_name": server_name,
+                            "content": event,
+                            "delivery": "next-turn"
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn get_session(&self, id: &str) -> Result<Arc<RwLock<Session>>> {

@@ -5,6 +5,7 @@ mod llm;
 mod skills;
 mod server;
 mod proactive;
+mod servers;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,6 +15,7 @@ use crate::logging::init_logging;
 use crate::session::SessionManager;
 use crate::skills::SkillsManager;
 use crate::llm::LlmClient;
+use crate::servers::ServerRegistry;
 use anyhow::Result;
 
 #[tokio::main]
@@ -29,7 +31,14 @@ async fn main() -> Result<()> {
     };
     tracing::info!("Ruster starting up...");
 
-    // 3. Init Skills
+    // 3. Init Servers Registry
+    let server_registry = {
+        let log_dir = crate::logging::get_log_dir()?;
+        let config_dir = log_dir.parent().unwrap().join("config");
+        Arc::new(ServerRegistry::new(&config_dir))
+    };
+
+    // 4. Init Skills
     let mut skills_manager = SkillsManager::new();
     let _ = skills_manager.ensure_default_skills();
     {
@@ -38,27 +47,39 @@ async fn main() -> Result<()> {
     }
     let skills_arc = Arc::new(RwLock::new(skills_manager));
 
-    // 4. Init LLM Client
+    // 5. Init LLM Client
     let llm_client = {
         let cfg = config_arc.read().await;
         LlmClient::new(cfg.proxy_url.clone().unwrap_or("http://localhost:8080".to_string()))
     };
 
-    // 5. Init Session Manager
+    // 6. Init Session Manager
     let session_manager = Arc::new(SessionManager::new(
         config_arc.clone(),
         skills_arc.clone(),
         llm_client.clone(),
+        server_registry.clone(),
     ));
 
-    // 6. Start Proactive Loop
+    // 7. Start Discovery Loop
+    let sr_clone = server_registry.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = sr_clone.scan_and_update().await {
+                tracing::error!("Server discovery error: {}", e);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+    });
+
+    // 8. Start Proactive Loop
     let sm_clone = session_manager.clone();
     let config_clone = config_arc.clone();
     tokio::spawn(async move {
         proactive::start_proactive_loop(sm_clone, config_clone).await;
     });
 
-    // 7. Start Server
+    // 9. Start Server
     let socket_path = {
         let cfg = config_arc.read().await;
         cfg.socket_path.clone()
@@ -72,7 +93,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 8. Wait for signals
+    // 10. Wait for signals
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
     
     tokio::select! {
@@ -84,16 +105,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Graceful shutdown logic?
-    // Server task handles connections in background.
-    // We should probably cancel server task or wait for current connections?
-    // Spec just says "Graceful shutdown on SIGTERM".
-    // Usually means close listener, finish pending requests.
-    // But UnixListener doesn't have easy "stop accept but finish connections".
-    // We'll just exit. The OS will clean up sockets.
-    // However, we should remove the socket file if possible.
-    // But server task removes it on start.
-    // Let's try to remove socket file on exit.
+    // Graceful shutdown logic
+    tracing::info!("Saving server registry...");
+    let _ = server_registry.save().await;
+    
     {
         let cfg = config_arc.read().await;
         let _ = std::fs::remove_file(&cfg.socket_path);

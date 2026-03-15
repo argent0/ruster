@@ -69,6 +69,29 @@ nc -U /tmp/ruster.sock
 }
 ```
 
+#### External Servers
+
+Ruster can connect to external "servers" that provide real-time events or tools.
+
+```json
+// List discovered servers
+{
+    "command": "server",
+    "arguments": { "action": "list" }
+}
+
+// Attach a session to a server
+{
+    "command": "server",
+    "arguments": {
+        "action": "attach",
+        "session_id": "test",
+        "server_name": "system-monitor",
+        "event_delivery": "next-turn"
+    }
+}
+```
+
 #### Configuration
 
 You can configure `ruster` dynamically through the socket:
@@ -87,14 +110,6 @@ You can configure `ruster` dynamically through the socket:
         "action": "set",
         "key": "log_level",
         "value": "debug"
-    }
-}
-
-{
-    "command": "config",
-    "arguments": {
-        "action": "get",
-        "key": "default_model"
     }
 }
 ```
@@ -150,83 +165,39 @@ Ruster follows the **Agent Skills** open standard. It automatically discovers sk
 
 ### Automatic Skill Selection (RAG)
 
-For **each user message**, Ruster performs a **RAG-based search** over the metadata (name + description) of all available skills. It then:
-1.  Identifies the most relevant skills (up to `rag_top_n` that are above `rag_threshold`).
-2.  **Dynamically loads** these skills into the current session.
-3.  Injects the full instructions of all loaded skills into the LLM's context.
-4.  Persists the discovered skills in the message history for that turn.
+For **each user message**, Ruster performs a **RAG-based search** over the metadata (name + description) of all available skills. It then identifies the most relevant skills, dynamically loads them, and injects their instructions into the LLM's context.
 
-Once a skill is loaded into a session (either via RAG or manually), it stays "active" for the duration of that session, ensuring the agent retains the capability as needed. You can manage these skills using the `skill` commands (add, list, search, remove, ban, unban).
+## Servers
 
-### Example: `~/.config/ruster/skills/joke-teller/SKILL.md`
+Ruster supports connecting to external processes called "Servers" via Unix sockets. These servers can push events to sessions or respond to direct queries.
 
-```markdown
----
-name: joke-teller
-description: Tells funny programming jokes. Use when user asks for a laugh.
----
+### Discovery
 
-# Joke Teller Instructions
+Ruster automatically scans `/tmp` for sockets matching the pattern `ruster-srv-<name>.sock`. Once discovered, a server appears in the `server list` command.
 
-You are a comedian specialized in programming humor.
-When the user asks for a joke, provide one related to:
-- Rust borrowing checker
-- Python whitespace
-- Java verbosity
+### Event Delivery Modes
 
-Keep it short and punchy.
-```
+When attaching a session to a server, you can specify how events from that server are delivered:
 
-When you ask Ruster for a joke, it will detect this skill, inject these instructions into the context, and the LLM will follow them.
+- **`immediate`**: The event is added to the session history, and the LLM is immediately triggered to generate a response.
+- **`proactive`**: The event is broadcasted to the proactive loop, which may decide to trigger the LLM based on internal logic.
+- **`next-turn`** (Default): The event is queued and injected as a system message during the next user-initiated turn.
+
+### Rate Limiting
+
+To prevent runaway loops or spam, Ruster applies a per-server, per-session rate limit (default: 5 events/sec with a burst of 10). If a server exceeds this limit, events are dropped, and a `rate_limited` event is emitted.
 
 ## Tool Calling (Function Calling)
 
-Ruster supports structured tool calling for LLMs that support it (Ollama, xAI, Gemini). Skills can define tools in their `SKILL.md` frontmatter, including execution logic.
-
-### Example Tool Definition in `SKILL.md`
-
-```yaml
----
-name: clock
-description: Fetches current date and time using system tools.
-tools:
-  - name: get_current_time
-    description: Returns the current system time.
-    parameters:
-      type: object
-      properties: {}
-    exec: "date '+%A, %B %d, %Y %H:%M:%S %Z'"
----
-```
+Ruster supports structured tool calling for LLMs that support it (Ollama, xAI, Gemini). Skills can define tools in their `SKILL.md` frontmatter.
 
 ### Execution and Logging
 
-When an LLM requests a tool call, Ruster:
-1. Assigns a unique **UUID** to the call.
-2. Executes the command specified in the `exec` field (via `bash -c`).
-3. Logs the call details, `stdout`, and `stderr` to `/tmp/ruster.run/tools/<uuid>/`.
-4. Injects the first **10 lines** (configurable) of the output back into the conversation.
-5. Emits a `tool_call` event over the socket:
-
-```json
-{
-  "event": "tool_call",
-  "session_id": "test",
-  "tool": "get_current_time",
-  "arguments": "{}",
-  "call_id": "550e8400-e29b-41d4-a716-446655440000",
-  "result_preview": "Friday, February 20, 2026 13:00:00 UTC"
-}
-```
-
-### Pagination
-
-If a tool produces large output, Ruster provides a built-in `paginate_tool_output` tool. The agent can use this tool to request more lines, search for specific terms, or view a different range of the captured `stdout`.
+When an LLM requests a tool call, Ruster executes the command and logs the call details, `stdout`, and `stderr` to `/tmp/ruster.run/tools/<uuid>/`. The first **10 lines** of output are injected back into the conversation.
 
 ## Configuration
 
 Configuration is located at `~/.config/ruster/config.toml`.
-Defaults are created on first run.
 
 ```toml
 socket_path = "/tmp/ruster.sock"
@@ -239,21 +210,14 @@ proactive_interval_secs = 300
 log_level = "info"
 tool_run_dir = "/tmp/ruster.run"
 tool_output_lines = 10
-proxy_url = "http://localhost:8080" # Optional: URL to LLM proxy or provider
+proxy_url = "http://localhost:8080"
 ```
 
 
 ## Proactivity
 
-Ruster runs a background loop that can trigger proactive events.
-Clients connected to the socket will receive:
-
-```json
-{"event":"proactive","session_id":"...","message":"Reminder: meeting in 30 min"}
-```
-
-Currently, this is a placeholder loop that emits a keepalive signal.
+Ruster runs a background loop that can trigger proactive events. Currently, this is a loop that emits keepalive signals and processes events marked with the `proactive` delivery mode.
 
 ## Logs
 
-Logs are written to `~/.var/app/ruster/logs/ruster.log` (rotating daily) and `activity.log` inside each session folder.
+Logs are written to `~/.var/app/ruster/logs/ruster.log` (rotating daily) and `activity.log` inside each session folder (`~/.local/share/ruster/sessions/<id>/`).

@@ -298,11 +298,121 @@ async fn process_command(req: CommandRequest, sm: Arc<SessionManager>, tx: mpsc:
             let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in skill arguments"))?;
             handle_skill_action(action, arguments.clone(), sm, tx).await
         },
+        "server" => {
+            let action = arguments["action"].as_str().ok_or_else(|| anyhow!("Missing action in server arguments"))?;
+            handle_server_action(action, arguments.clone(), sm, tx).await
+        },
         _ => {
             tx.send(json!({"error": format!("Unknown command: {}", command)})).await.map_err(|_| anyhow!("Send failed"))?;
             Ok(())
         }
     }
+}
+
+async fn handle_server_action(action: &str, args: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
+    tracing::info!(action = %action, "Processing server action");
+    match action {
+        "list" => {
+            let servers = sm.server_registry.servers.read().await;
+            let list: Vec<_> = servers.values().collect();
+            tx.send(json!({
+                "event": "server_list",
+                "servers": list
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "get" => {
+            let server_name = args["server_name"].as_str().ok_or_else(|| anyhow!("Missing server_name"))?;
+            let servers = sm.server_registry.servers.read().await;
+            if let Some(server) = servers.get(server_name) {
+                tx.send(json!({
+                    "event": "server_details",
+                    "server": server
+                })).await.map_err(|_| anyhow!("Send failed"))?;
+            } else {
+                tx.send(json!({"error": "Server not found"})).await.map_err(|_| anyhow!("Send failed"))?;
+            }
+        },
+        "attach" => {
+            let session_id = args["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+            let server_name = args["server_name"].as_str().ok_or_else(|| anyhow!("Missing server_name"))?;
+            let delivery = args["event_delivery"].as_str().unwrap_or("next-turn");
+            let mode: crate::servers::EventDeliveryMode = serde_json::from_value(json!(delivery)).unwrap_or_default();
+
+            // Connect if not connected
+            sm.server_registry.connect_to_server(server_name, sm.clone()).await?;
+
+            let session_arc = sm.get_session(session_id).await?;
+            let mut session = session_arc.write().await;
+            session.attach_server(server_name.to_string(), mode)?;
+
+            tx.send(json!({
+                "event": "server_attached",
+                "session_id": session_id,
+                "server_name": server_name,
+                "delivery": mode
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "detach" => {
+            let session_id = args["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+            let server_name = args["server_name"].as_str().ok_or_else(|| anyhow!("Missing server_name"))?;
+            
+            let session_arc = sm.get_session(session_id).await?;
+            let mut session = session_arc.write().await;
+            session.detach_server(server_name)?;
+
+            tx.send(json!({
+                "event": "server_detached",
+                "session_id": session_id,
+                "server_name": server_name
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "send" => {
+            let session_id = args["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+            let server_name = args["server_name"].as_str().ok_or_else(|| anyhow!("Missing server_name"))?;
+            let message = args["message"].clone();
+            let wait_reply = args["wait_reply"].as_bool().unwrap_or(false);
+
+            // Forward to server
+            let msg_id = sm.server_registry.send_message(server_name, session_id, message.clone()).await?;
+
+            // Add original message to history if wait_reply is true
+            if wait_reply {
+                 let session_arc = sm.get_session(session_id).await?;
+                 let mut session = session_arc.write().await;
+                 // We add with server name but marked as request?
+                 // Spec: "Ruster adds both original message and reply to session history"
+                 session.add_server_message(server_name, message)?;
+            }
+
+            tx.send(json!({
+                "event": "server_message_sent",
+                "session_id": session_id,
+                "server_name": server_name,
+                "id": msg_id
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        "subscribe" => {
+            let session_id = args["session_id"].as_str().ok_or_else(|| anyhow!("Missing session_id"))?;
+            let server_name = args["server_name"].as_str().ok_or_else(|| anyhow!("Missing server_name"))?;
+            let delivery = args["event_delivery"].as_str().ok_or_else(|| anyhow!("Missing event_delivery"))?;
+            let mode: crate::servers::EventDeliveryMode = serde_json::from_value(json!(delivery))?;
+
+            let session_arc = sm.get_session(session_id).await?;
+            let mut session = session_arc.write().await;
+            session.subscribe_server(server_name.to_string(), mode)?;
+
+            tx.send(json!({
+                "event": "server_subscribed",
+                "session_id": session_id,
+                "server_name": server_name,
+                "delivery": mode
+            })).await.map_err(|_| anyhow!("Send failed"))?;
+        },
+        _ => {
+            tx.send(json!({"error": format!("Unknown server action: {}", action)})).await.map_err(|_| anyhow!("Send failed"))?;
+        }
+    }
+    Ok(())
 }
 
 async fn handle_skill_action(action: &str, args: Value, sm: Arc<SessionManager>, tx: mpsc::Sender<Value>) -> Result<()> {
@@ -500,7 +610,7 @@ async fn handle_session_action(action: &str, req: Value, sm: Arc<SessionManager>
             
             // 2. Prepare context (detect skills)
             let (context, skills, tools) = {
-                let session = session_arc.read().await;
+                let mut session = session_arc.write().await;
                 session.prepare_context().await?
             };
             
